@@ -1,0 +1,16 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on Keep a Changelog and this project adheres to Semantic Versioning.
+
+- Keep a Changelog: https://keepachangelog.com/en/1.1.0/
+- Semantic Versioning: https://semver.org/spec/v2.0.0.html
+
+
+## [1.0.0] - 2024-06-30
+### Added
+- Initial release of JEI Dump.
+  - Exports JEI recipes into a static site with HTML, CSS, JS, and PNG assets.
+  - Supports vanilla and all JEI plugins.
+  - Usage instructions included in the README.

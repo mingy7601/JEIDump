@@ -1,0 +1,381 @@
+/* JEI Dump - Sphinx-inspired theme. Designed to feel like the "alabaster" / classic
+   Sphinx layout: fixed left sidebar with section index, wide article-like content area,
+   muted color palette, generous padding. */
+
+:root {
+    --c-bg: #ffffff;
+    --c-fg: #3e4349;
+    --c-muted: #6c7780;
+    --c-border: #e1e4e5;
+    --c-accent: #2980b9;
+    --c-accent-hover: #1c587f;
+    --c-sidebar-bg: #f7f7f7;
+    --c-code-bg: #f3f6f6;
+    --c-row-hover: #eef5fa;
+    --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+    --sidebar-width: 280px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--c-bg);
+    color: var(--c-fg);
+    font-family: var(--font-body);
+    font-size: 14px;
+    line-height: 1.55;
+}
+
+a { color: var(--c-accent); text-decoration: none; }
+a:hover { color: var(--c-accent-hover); text-decoration: underline; }
+
+code {
+    font-family: var(--font-mono);
+    background: var(--c-code-bg);
+    padding: 1px 4px;
+    border-radius: 3px;
+    font-size: 0.92em;
+}
+
+/* Top bar */
+.topbar {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 24px;
+    background: #2980b9;
+    color: #fff;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+}
+.topbar h1 {
+    font-size: 18px;
+    font-weight: 600;
+    margin: 0;
+    letter-spacing: 0.02em;
+}
+.search-wrap {
+    position: relative;
+    width: 380px;
+    max-width: 50vw;
+}
+.search-wrap input {
+    width: 100%;
+    padding: 7px 10px;
+    border: 1px solid #1c587f;
+    border-radius: 4px;
+    background: #fff;
+    color: #222;
+    font-size: 14px;
+}
+.search-wrap input:focus {
+    outline: 2px solid #f1c40f;
+    outline-offset: 1px;
+}
+.search-results {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
+    max-height: 60vh;
+    overflow-y: auto;
+    background: #fff;
+    border: 1px solid var(--c-border);
+    border-radius: 4px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+    z-index: 20;
+}
+.search-results .row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    cursor: pointer;
+    color: var(--c-fg);
+    border-bottom: 1px solid #f0f0f0;
+}
+.search-results .row:hover, .search-results .row.active {
+    background: var(--c-row-hover);
+}
+.search-results .row img {
+    width: 24px; height: 24px;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+}
+.search-results .row .meta {
+    font-size: 12px;
+    color: var(--c-muted);
+    margin-left: auto;
+}
+
+/* Layout: fixed sidebar + main content */
+.layout {
+    display: flex;
+    min-height: calc(100vh - 100px);
+}
+.sidebar {
+    width: var(--sidebar-width);
+    flex-shrink: 0;
+    background: var(--c-sidebar-bg);
+    border-right: 1px solid var(--c-border);
+    padding: 18px 16px;
+    overflow-y: auto;
+    max-height: calc(100vh - 50px);
+    position: sticky;
+    top: 50px;
+    align-self: flex-start;
+}
+.sidebar-section h2 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--c-muted);
+    margin: 0 0 8px 0;
+}
+.sidebar ul {
+    list-style: none;
+    padding: 0;
+    margin: 0 0 18px 0;
+}
+.sidebar li {
+    margin: 0;
+}
+.sidebar li a {
+    display: block;
+    padding: 4px 8px;
+    border-radius: 3px;
+    color: var(--c-fg);
+}
+.sidebar li a:hover { background: var(--c-row-hover); text-decoration: none; }
+.sidebar li.active > a {
+    background: var(--c-accent);
+    color: #fff;
+    font-weight: 600;
+}
+.sidebar .modname {
+    color: var(--c-muted);
+    font-size: 11px;
+    margin-left: 6px;
+}
+.sidebar .count {
+    color: var(--c-muted);
+    font-size: 11px;
+    float: right;
+}
+
+/* Main content */
+.content {
+    flex: 1;
+    padding: 24px 32px;
+    min-width: 0;
+}
+.content h2 {
+    font-size: 22px;
+    margin: 0 0 4px 0;
+    color: var(--c-fg);
+    border-bottom: 1px solid var(--c-border);
+    padding-bottom: 6px;
+}
+.content .subtitle {
+    color: var(--c-muted);
+    font-size: 13px;
+    margin: 0 0 18px 0;
+}
+
+/* Recipe grid */
+.recipe-grid {
+    display: grid;
+    /* Cards size to fit their image's natural display width (the dumper renders recipes at
+       a higher resolution, then app.js displays them at an integer multiple of the *logical*
+       canvas size). 240px is wide enough for the typical 128x64 vanilla recipe at 2x zoom
+       plus padding; oversized recipes spill into a wider track via auto-fill. */
+    grid-template-columns: repeat(auto-fill, minmax(240px, max-content));
+    justify-content: start;
+    gap: 14px;
+}
+.recipe-card {
+    padding: 8px;
+    background: #fff;
+    text-align: center;
+    transition: box-shadow 0.12s ease;
+    /* Fit the displayed image; never stretch. The wrap below sets explicit pixel width/height
+       to lock the image at an integer multiple of its logical size. */
+    width: max-content;
+}
+.recipe-card img {
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    display: block;
+}
+.recipe-card .idx {
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--c-muted);
+}
+
+/*
+ * Hotspot overlay over a recipe image. The wrap is sized in CSS pixels to match the displayed
+ * image (logicalSize * DISPLAY_ZOOM, set inline by app.js); hotspots are positioned in % of that
+ * wrap which equals % of the logical canvas, so the maths line up regardless of zoom.
+ */
+.recipe-img-wrap {
+    position: relative;
+    /* width / height are set inline by JS to lock the image at an integer multiple of its
+       logical size; declaring them here keeps the layout stable before the inline style is
+       applied (e.g. for the few ms before the image loads). */
+}
+.recipe-img-wrap img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+}
+.hotspot {
+    position: absolute;
+    box-sizing: border-box;
+    cursor: help;
+    border-radius: 2px;
+}
+.hotspot:hover, .hotspot:focus {
+    background: rgba(255, 255, 200, 0.35);
+    outline: 1px solid #f1c40f;
+    outline-offset: -1px;
+}
+
+.hint {
+    color: var(--c-muted);
+    font-size: 12px;
+    margin: -4px 0 12px;
+}
+.hint kbd {
+    border: 1px solid var(--c-border);
+    border-bottom-width: 2px;
+    border-radius: 3px;
+    padding: 0 4px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    background: var(--c-code-bg);
+}
+
+/* Ingredient-focus view: one section per category, each with its own recipe grid. */
+.ing-section {
+    margin-top: 22px;
+}
+.ing-section h3 {
+    font-size: 16px;
+    margin: 0 0 10px 0;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--c-border);
+}
+.ing-section .ing-mod {
+    color: var(--c-muted);
+    font-size: 12px;
+    font-weight: normal;
+    margin-left: 6px;
+}
+.hdr-icon {
+    width: 24px;
+    height: 24px;
+    vertical-align: middle;
+    margin-right: 6px;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+}
+
+/* Vanilla-flavoured tooltip popup; positioned in JS, follows the cursor. */
+.jei-tooltip {
+    position: fixed;
+    z-index: 999;
+    pointer-events: none;
+    background: #100010;
+    border: 1px solid #2a0a5a;
+    color: #ffffff;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.4;
+    padding: 6px 8px;
+    max-width: 320px;
+    box-shadow: 0 0 0 1px #050005;
+}
+.jei-tooltip .tt-name { color: #ffffff; font-weight: bold; }
+.jei-tooltip .tt-line { color: #aaaaaa; }
+.jei-tooltip .tt-mod { color: #5599ff; font-style: italic; margin-top: 2px; }
+
+/* Index / welcome */
+.index-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 12px;
+    margin-top: 14px;
+}
+.index-grid a {
+    display: block;
+    padding: 10px 12px;
+    border: 1px solid var(--c-border);
+    border-radius: 4px;
+    background: #fff;
+}
+.index-grid a:hover {
+    background: var(--c-row-hover);
+    text-decoration: none;
+}
+.index-grid .modname {
+    color: var(--c-muted);
+    font-size: 11px;
+    display: block;
+    margin-top: 2px;
+}
+
+/* Pagination */
+.pager {
+    display: flex;
+    justify-content: center;
+    gap: 8px;
+    margin-top: 22px;
+    flex-wrap: wrap;
+}
+.pager button {
+    padding: 4px 10px;
+    border: 1px solid var(--c-border);
+    background: #fff;
+    border-radius: 3px;
+    cursor: pointer;
+    font: inherit;
+    color: var(--c-fg);
+}
+.pager button.active {
+    background: var(--c-accent);
+    color: #fff;
+    border-color: var(--c-accent);
+}
+.pager button:hover:not(:disabled) {
+    background: var(--c-row-hover);
+}
+.pager button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Footer */
+.footer {
+    border-top: 1px solid var(--c-border);
+    padding: 14px 24px;
+    color: var(--c-muted);
+    font-size: 12px;
+    text-align: center;
+}
+
+/* Responsive */
+@media (max-width: 800px) {
+    .layout { flex-direction: column; }
+    .sidebar {
+        width: 100%;
+        position: static;
+        max-height: none;
+        border-right: none;
+        border-bottom: 1px solid var(--c-border);
+    }
+    .search-wrap { width: 200px; }
+}

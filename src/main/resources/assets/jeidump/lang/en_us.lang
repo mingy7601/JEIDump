@@ -1,0 +1,6 @@
+jeidump.command.usage=/dumpjei [folder] [recipesPerTick] - dumps all JEI recipes and assets to <gameDir>/jeidump/<folder>.
+jeidump.command.start=Starting JEI dump to %s ...
+jeidump.command.progress=Dumped %d / %d recipes (%s).
+jeidump.command.done=JEI dump complete: %d categories, %d recipes, %d unique icons. Output: %s
+jeidump.command.error=JEI dump failed: %s
+jeidump.command.no_runtime=JEI runtime is not ready yet. Open the JEI overlay once and try again.

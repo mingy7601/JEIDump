@@ -1,0 +1,35 @@
+apply from: 'gradle/scripts/helpers.gradle'
+
+repositories {
+    mavenCentral()
+    maven {
+        name = 'CleanroomMC Maven'
+        url = 'https://maven.cleanroommc.com'
+    }
+    // JEI 1.12.2 jars (mezz.jei:jei_1.12.2) are hosted on the BlameJared Maven.
+    maven {
+        name = 'BlameJared Maven'
+        url = 'https://maven.blamejared.com'
+    }
+    exclusiveContent {
+        forRepository {
+            maven {
+                name 'CurseMaven'
+                url 'https://cursemaven.com'
+            }
+        }
+        filter {
+            includeGroup 'curse.maven'
+        }
+    }
+    mavenLocal()
+}
+
+dependencies {
+    // Dev convenience: avoid needing a real Forge online check on startup
+    runtimeOnly 'com.cleanroommc:strip-latest-forge-requirements:1.0'
+    runtimeOnly 'com.cleanroommc:osxnarratorblocker:1.0'
+
+    // JEI 1.12.2: required at compile (we extend its API) and at runtime in dev
+    implementation 'mezz.jei:jei_1.12.2:4.16.1.302'
+}
