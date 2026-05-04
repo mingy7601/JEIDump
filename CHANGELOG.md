@@ -8,7 +8,12 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 - Semantic Versioning: https://semver.org/spec/v2.0.0.html
 
 
-## [1.0.0] - 2024-06-30
+## [1.0.1] - 2025-05-04
+### Fixed
+- Fix github link in footer.
+
+
+## [1.0.0] - 2025-05-04
 ### Added
 - Initial release of JEI Dump.
   - Exports JEI recipes into a static site with HTML, CSS, JS, and PNG assets.
