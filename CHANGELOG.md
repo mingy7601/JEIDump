@@ -15,6 +15,9 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 - Deduplicate shared recipe backgrounds per category in exported dumps, and layer the shared background below per-recipe foreground PNGs on the website when it reduces the total image size.
 - Export arbitrary JEI ingredient types, using JEI's registered ingredient helpers and renderers instead of hardcoded item and fluid handling.
 
+### Fixed
+- Fix recipe hotspots reusing the first-seen tooltip for shared ingredient ids, so different stack amounts of the same fluid now show their own correct value.
+
 
 ## [1.0.1] - 2025-05-04
 ### Fixed

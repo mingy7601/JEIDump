@@ -45,6 +45,7 @@ import mezz.jei.api.IJeiRuntime;
 import mezz.jei.api.IRecipeRegistry;
 import mezz.jei.api.gui.IGuiIngredient;
 import mezz.jei.api.gui.IGuiIngredientGroup;
+import mezz.jei.api.gui.ITooltipCallback;
 import mezz.jei.api.gui.IRecipeLayoutDrawable;
 import mezz.jei.api.ingredients.IIngredientHelper;
 import mezz.jei.api.ingredients.IIngredientRegistry;
@@ -90,7 +91,10 @@ import com.jeidump.i18n.JeiDumpLocales;
  *   <li>{@code img}: the full recipe PNG, or the per-recipe foreground layer when the category
  *       also exposes {@code backgroundImg}.</li>
  *   <li>{@code slots}: array of {@code {x,y,w,h,id,kind,role}} so the frontend can overlay
- *       hotspots that exactly match JEI's layout for hover/tooltip + click navigation.</li>
+ *       hotspots that exactly match JEI's layout for hover/tooltip + click navigation. Slots may
+ *       also carry {@code tooltip}/{@code tooltipHtml} overrides when the live JEI tooltip for
+ *       that stack differs from the shared ingredient metadata, for example fluids with
+ *       different amounts.</li>
  * </ul>
  *
  * Per-category JSON may also include:
@@ -103,7 +107,8 @@ import com.jeidump.i18n.JeiDumpLocales;
  * <ul>
  *   <li>{@code nameHtml}: ingredient display name with Minecraft formatting codes converted to
  *       HTML spans for the frontend.</li>
- *   <li>{@code tooltip}: array of plain strings (vanilla NORMAL flag, color codes stripped),
+ *   <li>{@code tooltip}: array of plain strings (slot-aware JEI NORMAL tooltip, color codes
+ *       stripped),
  *       used for search keys and plain-text fallbacks.</li>
  *   <li>{@code tooltipHtml}: array of tooltip lines with Minecraft formatting codes converted to
  *       HTML spans for the frontend.</li>
@@ -233,6 +238,20 @@ public class Dumper {
     @Nullable
     private static Field recipeLayoutGroupsField;
     private static boolean recipeLayoutGroupsResolved;
+
+    // Cached reflective handles to JEI's concrete GuiIngredient fields used to rebuild the same
+    // slot-specific tooltip data the live overlay would show. The registry-level renderer may use
+    // a simpler tooltip mode, which drops per-slot amount lines for fluids and custom ingredients.
+    @Nullable
+    private static Field guiIngredientRendererField;
+    @Nullable
+    private static Field guiIngredientTooltipCallbackField;
+    @Nullable
+    private static Field guiIngredientSlotIndexField;
+    @Nullable
+    private static Field guiIngredientInputField;
+    private static boolean guiIngredientTooltipFieldsResolved;
+
     @Nullable
     private static IFocus<ItemStack> fallbackFocus;
 
@@ -533,16 +552,17 @@ public class Dumper {
             T primary = firstRenderableIngredient(state, ingredient);
             if (primary == null) continue;
 
-            String primaryId = registerIngredient(state, primary);
+            String primaryId = registerIngredient(state, primary, ingredient);
             (ingredient.isInput() ? inputs : outputs).add(new JsonPrimitive(primaryId));
-            addSlot(slots, ingredient, primaryId, state.kind, RECIPE_PADDING);
+            addSlot(slots, ingredient, primaryId, state.kind, RECIPE_PADDING,
+                buildSlotTooltipOverride(primaryId, buildIngredientTooltip(state, ingredient, primary)));
 
             Set<String> indexedIds = new LinkedHashSet<>();
             indexedIds.add(primaryId);
             for (T value : expandIngredients(state, ingredient.getAllIngredients())) {
                 if (!isRenderableIngredient(state, value)) continue;
 
-                indexedIds.add(registerIngredient(state, value));
+                indexedIds.add(registerIngredient(state, value, ingredient));
             }
 
             String role = ingredient.isInput() ? "in" : "out";
@@ -643,7 +663,8 @@ public class Dumper {
         return result.isEmpty() ? filtered : result;
     }
 
-    private <T> String registerIngredient(IngredientTypeState<T> state, T ingredient) throws IOException {
+    private <T> String registerIngredient(IngredientTypeState<T> state, T ingredient,
+                                          @Nullable IGuiIngredient<T> guiIngredient) throws IOException {
         String id = state.kind + ":" + safeUniqueId(state, ingredient);
         if (ingredientMeta.containsKey(id)) return id;
 
@@ -655,7 +676,7 @@ public class Dumper {
         renderer.renderIngredientIcon(state.renderer, ingredient, new File(state.rootDir, fileStem + ".png"));
 
         String displayName = safeDisplayName(state, ingredient);
-        TooltipText tooltip = buildIngredientTooltip(state, ingredient);
+        TooltipText tooltip = buildIngredientTooltip(state, guiIngredient, ingredient);
 
         JsonObject meta = new JsonObject();
         meta.addProperty("name", stripFormatting(displayName));
@@ -695,16 +716,107 @@ public class Dumper {
         }
     }
 
-    private static <T> TooltipText buildIngredientTooltip(IngredientTypeState<T> state, T ingredient) {
-        TooltipText tooltip = new TooltipText();
+    @Nullable
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static <T> List<String> readGuiIngredientTooltip(@Nullable IGuiIngredient<T> guiIngredient,
+                                                             T ingredient) {
+        if (guiIngredient == null) return null;
+
+        resolveGuiIngredientTooltipFields();
+        if (guiIngredientRendererField == null || guiIngredientSlotIndexField == null || guiIngredientInputField == null) {
+            return null;
+        }
+
         try {
-            List<String> lines = state.renderer.getTooltip(Minecraft.getMinecraft(), ingredient, ITooltipFlag.TooltipFlags.NORMAL);
-            if (lines != null) {
-                for (String line : lines) {
-                    tooltip.plain.add(new JsonPrimitive(stripFormatting(line)));
-                    tooltip.html.add(new JsonPrimitive(formatMinecraftTextToHtml(line)));
-                }
+            if (!guiIngredientRendererField.getDeclaringClass().isInstance(guiIngredient)) return null;
+
+            Object rendererValue = guiIngredientRendererField.get(guiIngredient);
+            if (!(rendererValue instanceof IIngredientRenderer)) return null;
+
+            List<String> tooltip = ((IIngredientRenderer<T>) rendererValue)
+                .getTooltip(Minecraft.getMinecraft(), ingredient, ITooltipFlag.TooltipFlags.NORMAL);
+            if (tooltip == null) return null;
+
+            List<String> lines = new ArrayList<>(tooltip);
+            Object callbackValue = guiIngredientTooltipCallbackField == null ? null : guiIngredientTooltipCallbackField.get(guiIngredient);
+            if (callbackValue instanceof ITooltipCallback) {
+                ((ITooltipCallback<T>) callbackValue).onTooltip(
+                    guiIngredientSlotIndexField.getInt(guiIngredient),
+                    guiIngredientInputField.getBoolean(guiIngredient),
+                    ingredient,
+                    lines
+                );
             }
+            return lines;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static void resolveGuiIngredientTooltipFields() {
+        if (guiIngredientTooltipFieldsResolved) return;
+
+        guiIngredientTooltipFieldsResolved = true;
+        try {
+            Class<?> guiIngredientClass = Class.forName("mezz.jei.gui.ingredients.GuiIngredient");
+            guiIngredientRendererField = guiIngredientClass.getDeclaredField("ingredientRenderer");
+            guiIngredientRendererField.setAccessible(true);
+            guiIngredientTooltipCallbackField = guiIngredientClass.getDeclaredField("tooltipCallback");
+            guiIngredientTooltipCallbackField.setAccessible(true);
+            guiIngredientSlotIndexField = guiIngredientClass.getDeclaredField("slotIndex");
+            guiIngredientSlotIndexField.setAccessible(true);
+            guiIngredientInputField = guiIngredientClass.getDeclaredField("input");
+            guiIngredientInputField.setAccessible(true);
+        } catch (Throwable t) {
+            JeiDump.LOGGER.warn("Cannot resolve GuiIngredient tooltip internals, falling back to registry renderers: {}", t.toString());
+        }
+    }
+
+    private static void addTooltipLines(TooltipText tooltip, List<String> lines) {
+        for (String line : lines) {
+            tooltip.plain.add(new JsonPrimitive(stripFormatting(line)));
+            tooltip.html.add(new JsonPrimitive(formatMinecraftTextToHtml(line)));
+        }
+    }
+
+    private TooltipText buildSlotTooltipOverride(String ingredientId, TooltipText slotTooltip) {
+        JsonObject meta = ingredientMeta.get(ingredientId);
+        if (meta == null) return slotTooltip;
+        if (jsonArraysEqual(meta.getAsJsonArray("tooltip"), slotTooltip.plain)
+            && jsonArraysEqual(meta.getAsJsonArray("tooltipHtml"), slotTooltip.html)) {
+            return null;
+        }
+
+        return slotTooltip;
+    }
+
+    private static boolean jsonArraysEqual(@Nullable JsonArray left, @Nullable JsonArray right) {
+        if (left == right) return true;
+        if (left == null || right == null) return false;
+        if (left.size() != right.size()) return false;
+
+        for (int index = 0; index < left.size(); index++) {
+            if (!left.get(index).equals(right.get(index))) return false;
+        }
+
+        return true;
+    }
+
+    private static <T> TooltipText buildIngredientTooltip(IngredientTypeState<T> state,
+                                                          @Nullable IGuiIngredient<T> guiIngredient,
+                                                          T ingredient) {
+        TooltipText tooltip = new TooltipText();
+        List<String> lines = readGuiIngredientTooltip(guiIngredient, ingredient);
+
+        if (lines != null) {
+            addTooltipLines(tooltip, lines);
+        }
+
+        if (tooltip.plain.size() > 0) return tooltip;
+
+        try {
+            lines = state.renderer.getTooltip(Minecraft.getMinecraft(), ingredient, ITooltipFlag.TooltipFlags.NORMAL);
+            if (lines != null) addTooltipLines(tooltip, lines);
         } catch (Throwable t) {
             // Fall back to the helper's display name only.
         }
@@ -956,7 +1068,8 @@ public class Dumper {
      * {@code (padding, padding)} on the padded canvas; without the offset the frontend hotspots
      * would land in the empty band on the top-left of the image.
      */
-    private static void addSlot(JsonArray slots, IGuiIngredient<?> ig, String id, String kind, int padding) {
+    private static void addSlot(JsonArray slots, IGuiIngredient<?> ig, String id, String kind, int padding,
+                                @Nullable TooltipText tooltipOverride) {
         Rectangle r = readRect(ig);
         if (r == null) return;
         JsonObject slot = new JsonObject();
@@ -967,6 +1080,10 @@ public class Dumper {
         slot.addProperty("id", id);
         slot.addProperty("kind", kind);
         slot.addProperty("role", ig.isInput() ? "in" : "out");
+        if (tooltipOverride != null) {
+            slot.add("tooltip", tooltipOverride.plain);
+            slot.add("tooltipHtml", tooltipOverride.html);
+        }
         slots.add(slot);
     }
 

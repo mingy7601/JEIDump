@@ -378,6 +378,10 @@
                 hotspot.dataset.id = slot.id;
                 hotspot.dataset.kind = slot.kind;
                 hotspot.dataset.role = slot.role;
+                // Keep structured tooltip overrides on the DOM node instead of serializing them
+                // through data-* attributes, which would force lossy escaping/parsing.
+                hotspot.jeiTooltip = slot.tooltip || null;
+                hotspot.jeiTooltipHtml = slot.tooltipHtml || null;
                 hotspot.style.left = (slot.x / recipe.w * 100).toFixed(3) + '%';
                 hotspot.style.top = (slot.y / recipe.h * 100).toFixed(3) + '%';
                 hotspot.style.width = (slot.w / recipe.w * 100).toFixed(3) + '%';
@@ -844,8 +848,8 @@
         }
 
         // First line = display name (white), rest dimmed (matches vanilla aesthetic).
-        const lines = meta.tooltip && meta.tooltip.length ? meta.tooltip : [meta.name];
-        const htmlLines = meta.tooltipHtml && meta.tooltipHtml.length ? meta.tooltipHtml : [];
+        const lines = spot.jeiTooltip && spot.jeiTooltip.length ? spot.jeiTooltip : (meta.tooltip && meta.tooltip.length ? meta.tooltip : [meta.name]);
+        const htmlLines = spot.jeiTooltipHtml && spot.jeiTooltipHtml.length ? spot.jeiTooltipHtml : (meta.tooltipHtml && meta.tooltipHtml.length ? meta.tooltipHtml : []);
         tip.replaceChildren();
 
         const titleLine = node('div', 'tt-name');
