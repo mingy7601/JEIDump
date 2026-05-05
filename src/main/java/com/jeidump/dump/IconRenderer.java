@@ -77,6 +77,227 @@ public class IconRenderer {
         }
     }
 
+    /** One incremental step of the background split state machine. */
+    public static class DeduplicationStepResult {
+        public final boolean complete;
+        public final boolean consumedImage;
+
+        private DeduplicationStepResult(boolean complete, boolean consumedImage) {
+            this.complete = complete;
+            this.consumedImage = consumedImage;
+        }
+    }
+
+    /**
+     * Stateful category background splitter.
+     *
+     * The dumper advances this one image operation at a time so the post-processing pass can
+     * yield between ticks instead of blocking on an entire category at once.
+     */
+    public static class DeduplicationSession {
+        private enum Phase {
+            INIT,
+            COMPARE,
+            PREPARE_BACKGROUND,
+            ENCODE_FOREGROUNDS,
+            APPLY_BACKGROUND,
+            APPLY_FOREGROUNDS,
+            DONE
+        }
+
+        private final List<File> recipeFiles;
+        private final File backgroundFile;
+
+        private Phase phase = Phase.INIT;
+        private long originalBytes;
+        private long splitBytes;
+        private boolean applied;
+
+        private int width;
+        private int height;
+        private int[] sharedPixels;
+        private boolean[] sharedMask;
+        private int compareIndex;
+        private int encodeIndex;
+        private int applyIndex;
+
+        private byte[] backgroundBytes;
+        private List<byte[]> foregroundBytes;
+
+        private DeduplicationSession(List<File> recipeFiles, File backgroundFile) {
+            this.recipeFiles = new ArrayList<>(recipeFiles);
+            this.backgroundFile = backgroundFile;
+        }
+
+        public DeduplicationStepResult step() throws IOException {
+            while (true) {
+                switch (phase) {
+                    case INIT:
+                        originalBytes = totalBytes(recipeFiles);
+                        if (recipeFiles.size() < 2) {
+                            phase = Phase.DONE;
+                            return new DeduplicationStepResult(true, false);
+                        }
+
+                        BufferedImage first = readPng(recipeFiles.get(0));
+                        if (first == null) {
+                            phase = Phase.DONE;
+                            return new DeduplicationStepResult(true, false);
+                        }
+
+                        width = first.getWidth();
+                        height = first.getHeight();
+                        sharedPixels = first.getRGB(0, 0, width, height, null, 0, width);
+                        sharedMask = new boolean[sharedPixels.length];
+                        Arrays.fill(sharedMask, true);
+                        compareIndex = 1;
+                        phase = Phase.COMPARE;
+                        return new DeduplicationStepResult(false, true);
+
+                    case COMPARE:
+                        if (compareIndex >= recipeFiles.size()) {
+                            phase = Phase.PREPARE_BACKGROUND;
+                            continue;
+                        }
+
+                        BufferedImage compared = readPng(recipeFiles.get(compareIndex));
+                        if (compared == null || compared.getWidth() != width || compared.getHeight() != height) {
+                            phase = Phase.DONE;
+                            return new DeduplicationStepResult(true, false);
+                        }
+
+                        int[] pixels = compared.getRGB(0, 0, width, height, null, 0, width);
+                        for (int pixelIndex = 0; pixelIndex < sharedPixels.length; pixelIndex++) {
+                            if (sharedMask[pixelIndex] && pixels[pixelIndex] != sharedPixels[pixelIndex]) {
+                                sharedMask[pixelIndex] = false;
+                            }
+                        }
+
+                        compareIndex++;
+                        return new DeduplicationStepResult(false, true);
+
+                    case PREPARE_BACKGROUND:
+                        int[] backgroundPixels = new int[sharedPixels.length];
+                        int sharedOpaquePixels = 0;
+                        for (int pixelIndex = 0; pixelIndex < sharedPixels.length; pixelIndex++) {
+                            if (!sharedMask[pixelIndex]) continue;
+
+                            int pixel = sharedPixels[pixelIndex];
+                            backgroundPixels[pixelIndex] = pixel;
+                            if ((pixel >>> 24) != 0) sharedOpaquePixels++;
+                        }
+
+                        if (sharedOpaquePixels == 0) {
+                            phase = Phase.DONE;
+                            return new DeduplicationStepResult(true, false);
+                        }
+
+                        BufferedImage background = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
+                        background.setRGB(0, 0, width, height, backgroundPixels, 0, width);
+                        backgroundBytes = pngBytes(background);
+                        splitBytes = backgroundBytes.length;
+                        foregroundBytes = new ArrayList<>(recipeFiles.size());
+                        encodeIndex = 0;
+                        phase = Phase.ENCODE_FOREGROUNDS;
+                        return new DeduplicationStepResult(false, true);
+
+                    case ENCODE_FOREGROUNDS:
+                        if (encodeIndex >= recipeFiles.size()) {
+                            if (splitBytes >= originalBytes) {
+                                backgroundBytes = null;
+                                foregroundBytes = null;
+                                phase = Phase.DONE;
+                                return new DeduplicationStepResult(true, false);
+                            }
+
+                            phase = Phase.APPLY_BACKGROUND;
+                            continue;
+                        }
+
+                        BufferedImage encodedImage = readPng(recipeFiles.get(encodeIndex));
+                        if (encodedImage == null || encodedImage.getWidth() != width || encodedImage.getHeight() != height) {
+                            backgroundBytes = null;
+                            foregroundBytes = null;
+                            phase = Phase.DONE;
+                            return new DeduplicationStepResult(true, false);
+                        }
+
+                        int[] encodedPixels = encodedImage.getRGB(0, 0, width, height, null, 0, width);
+                        for (int pixelIndex = 0; pixelIndex < encodedPixels.length; pixelIndex++) {
+                            if (sharedMask[pixelIndex]) encodedPixels[pixelIndex] = 0;
+                        }
+
+                        BufferedImage foreground = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
+                        foreground.setRGB(0, 0, width, height, encodedPixels, 0, width);
+
+                        byte[] encoded = pngBytes(foreground);
+                        splitBytes += encoded.length;
+                        foregroundBytes.add(encoded);
+                        encodeIndex++;
+
+                        if (splitBytes >= originalBytes) {
+                            backgroundBytes = null;
+                            foregroundBytes = null;
+                            phase = Phase.DONE;
+                            return new DeduplicationStepResult(true, true);
+                        }
+
+                        return new DeduplicationStepResult(false, true);
+
+                    case APPLY_BACKGROUND:
+                        File parent = backgroundFile.getParentFile();
+                        if (parent != null && !parent.exists()) parent.mkdirs();
+                        Files.write(backgroundFile.toPath(), backgroundBytes);
+                        phase = Phase.APPLY_FOREGROUNDS;
+                        return new DeduplicationStepResult(false, true);
+
+                    case APPLY_FOREGROUNDS:
+                        if (applyIndex >= recipeFiles.size()) {
+                            applied = true;
+                            backgroundBytes = null;
+                            foregroundBytes = null;
+                            phase = Phase.DONE;
+                            return new DeduplicationStepResult(true, false);
+                        }
+
+                        Files.write(recipeFiles.get(applyIndex).toPath(), foregroundBytes.get(applyIndex));
+                        applyIndex++;
+                        if (applyIndex >= recipeFiles.size()) {
+                            applied = true;
+                            backgroundBytes = null;
+                            foregroundBytes = null;
+                            phase = Phase.DONE;
+                            return new DeduplicationStepResult(true, true);
+                        }
+
+                        return new DeduplicationStepResult(false, true);
+
+                    case DONE:
+                        return new DeduplicationStepResult(true, false);
+
+                    default:
+                        throw new IllegalStateException("Unknown deduplication phase " + phase);
+                }
+            }
+        }
+
+        public long getOriginalBytes() {
+            return originalBytes;
+        }
+
+        public long getDeduplicatedBytes() {
+            return applied ? splitBytes : originalBytes;
+        }
+
+        public boolean wasApplied() {
+            return applied;
+        }
+
+        public long getSavedBytes() {
+            return applied ? Math.max(0L, originalBytes - splitBytes) : 0L;
+        }
+    }
+
     /**
      * Renders a complete recipe layout (background + slots + extras + tooltips).
      *
@@ -164,80 +385,22 @@ public class IconRenderer {
      * <p>
      * The split is only kept if the encoded PNG bytes shrink compared to the original recipe set.
      */
+    public DeduplicationSession startCategoryBackgroundDeduplication(List<File> recipeFiles, File backgroundFile) {
+        return new DeduplicationSession(recipeFiles, backgroundFile);
+    }
+
     public DeduplicationResult deduplicateCategoryBackground(List<File> recipeFiles, File backgroundFile) throws IOException {
-        long originalBytes = totalBytes(recipeFiles);
-        if (recipeFiles.size() < 2) return new DeduplicationResult(originalBytes, originalBytes, false);
+        DeduplicationSession session = startCategoryBackgroundDeduplication(recipeFiles, backgroundFile);
+        while (true) {
+            DeduplicationStepResult result = session.step();
+            if (!result.complete) continue;
 
-        BufferedImage first = readPng(recipeFiles.get(0));
-        if (first == null) return new DeduplicationResult(originalBytes, originalBytes, false);
-
-        int width = first.getWidth();
-        int height = first.getHeight();
-        int[] sharedPixels = first.getRGB(0, 0, width, height, null, 0, width);
-        boolean[] sharedMask = new boolean[sharedPixels.length];
-        Arrays.fill(sharedMask, true);
-
-        for (int fileIndex = 1; fileIndex < recipeFiles.size(); fileIndex++) {
-            File recipeFile = recipeFiles.get(fileIndex);
-            BufferedImage image = readPng(recipeFile);
-            if (image == null || image.getWidth() != width || image.getHeight() != height) {
-                return new DeduplicationResult(originalBytes, originalBytes, false);
-            }
-
-            int[] pixels = image.getRGB(0, 0, width, height, null, 0, width);
-            for (int pixelIndex = 0; pixelIndex < sharedPixels.length; pixelIndex++) {
-                if (sharedMask[pixelIndex] && pixels[pixelIndex] != sharedPixels[pixelIndex]) {
-                    sharedMask[pixelIndex] = false;
-                }
-            }
+            return new DeduplicationResult(
+                session.getOriginalBytes(),
+                session.getDeduplicatedBytes(),
+                session.wasApplied()
+            );
         }
-
-        int[] backgroundPixels = new int[sharedPixels.length];
-        int sharedOpaquePixels = 0;
-        for (int pixelIndex = 0; pixelIndex < sharedPixels.length; pixelIndex++) {
-            if (!sharedMask[pixelIndex]) continue;
-
-            int pixel = sharedPixels[pixelIndex];
-            backgroundPixels[pixelIndex] = pixel;
-            if ((pixel >>> 24) != 0) sharedOpaquePixels++;
-        }
-
-        if (sharedOpaquePixels == 0) return new DeduplicationResult(originalBytes, originalBytes, false);
-
-        BufferedImage background = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
-        background.setRGB(0, 0, width, height, backgroundPixels, 0, width);
-
-        byte[] backgroundBytes = pngBytes(background);
-        List<byte[]> foregroundBytes = new ArrayList<>(recipeFiles.size());
-        long splitBytes = backgroundBytes.length;
-
-        for (File recipeFile : recipeFiles) {
-            BufferedImage image = readPng(recipeFile);
-            if (image == null || image.getWidth() != width || image.getHeight() != height) {
-                return new DeduplicationResult(originalBytes, originalBytes, false);
-            }
-
-            int[] pixels = image.getRGB(0, 0, width, height, null, 0, width);
-            for (int pixelIndex = 0; pixelIndex < pixels.length; pixelIndex++) {
-                if (sharedMask[pixelIndex]) pixels[pixelIndex] = 0;
-            }
-
-            BufferedImage foreground = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
-            foreground.setRGB(0, 0, width, height, pixels, 0, width);
-
-            byte[] encoded = pngBytes(foreground);
-            splitBytes += encoded.length;
-            foregroundBytes.add(encoded);
-        }
-
-        if (splitBytes >= originalBytes) return new DeduplicationResult(originalBytes, originalBytes, false);
-
-        Files.write(backgroundFile.toPath(), backgroundBytes);
-        for (int fileIndex = 0; fileIndex < recipeFiles.size(); fileIndex++) {
-            Files.write(recipeFiles.get(fileIndex).toPath(), foregroundBytes.get(fileIndex));
-        }
-
-        return new DeduplicationResult(originalBytes, splitBytes, true);
     }
 
     private static long totalBytes(List<File> files) throws IOException {

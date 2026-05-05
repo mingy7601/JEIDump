@@ -342,6 +342,28 @@ code {
     image-rendering: crisp-edges;
 }
 
+.mc-color-0 { color: #000000; }
+.mc-color-1 { color: #0000aa; }
+.mc-color-2 { color: #00aa00; }
+.mc-color-3 { color: #00aaaa; }
+.mc-color-4 { color: #aa0000; }
+.mc-color-5 { color: #aa00aa; }
+.mc-color-6 { color: #ffaa00; }
+.mc-color-7 { color: #aaaaaa; }
+.mc-color-8 { color: #555555; }
+.mc-color-9 { color: #5555ff; }
+.mc-color-a { color: #55ff55; }
+.mc-color-b { color: #55ffff; }
+.mc-color-c { color: #ff5555; }
+.mc-color-d { color: #ff55ff; }
+.mc-color-e { color: #ffff55; }
+.mc-color-f { color: #ffffff; }
+.mc-obfuscated { filter: blur(0.75px); }
+.mc-bold { font-weight: bold; }
+.mc-strikethrough { text-decoration: line-through; }
+.mc-underline { text-decoration: underline; }
+.mc-italic { font-style: italic; }
+
 /* Vanilla-flavoured tooltip popup; positioned in JS, follows the cursor. */
 .jei-tooltip {
     position: fixed;
@@ -360,6 +382,11 @@ code {
 .jei-tooltip .tt-name { color: #ffffff; font-weight: bold; }
 .jei-tooltip .tt-line { color: #aaaaaa; }
 .jei-tooltip .tt-mod { color: #5599ff; font-style: italic; margin-top: 2px; }
+.jei-tooltip .tt-name,
+.jei-tooltip .tt-line,
+.jei-tooltip .tt-mod {
+    white-space: pre-wrap;
+}
 
 /* Index / welcome */
 .index-grid {

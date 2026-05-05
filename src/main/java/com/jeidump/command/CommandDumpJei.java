@@ -116,14 +116,16 @@ public class CommandDumpJei extends CommandBase {
         public final Dumper job;
         private final ICommandSender chatSender;
         private final File outDir;
-        private final int budget;
+        private final int recipeBudget;
+        private final int backgroundSplitBudget;
         private boolean finished;
 
         DumpRunner(Dumper job, ICommandSender chatSender, File outDir, int budget) {
             this.job = job;
             this.chatSender = chatSender;
             this.outDir = outDir;
-            this.budget = budget;
+            this.recipeBudget = budget;
+            this.backgroundSplitBudget = Math.max(1, JeiDumpConfig.backgroundSplitImagesPerTick);
         }
 
         @SubscribeEvent
@@ -134,7 +136,7 @@ public class CommandDumpJei extends CommandBase {
 
             boolean more;
             try {
-                more = job.step(budget);
+                more = job.step(recipeBudget, backgroundSplitBudget);
             } catch (Throwable t) {
                 JeiDump.LOGGER.error("JEI dump step failed", t);
                 chatSender.sendMessage(new TextComponentTranslation("jeidump.command.error", String.valueOf(t.getMessage())));

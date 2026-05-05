@@ -67,7 +67,8 @@ import com.jeidump.i18n.JeiDumpLocales;
  * The work is split into three phases:
  * <ol>
  *   <li>{@link #setup()}: prepares the output directory tree and pre-counts recipes.</li>
- *   <li>{@link #step(int)}: processes up to {@code budget} recipes per call. Returns
+ *   <li>{@link #step(int, int)}: processes recipe renders and, once they are done, background
+ *       split image work in small batches per call. Returns
  *       {@code true} while there is more work to do; the caller (a Forge {@code ClientTickEvent}
  *       handler) invokes this once per tick to keep the OS event loop alive.</li>
  *   <li>{@link #finish()}: writes locale-aware data files and copies the bundled web frontend.</li>
@@ -100,8 +101,12 @@ import com.jeidump.i18n.JeiDumpLocales;
  *
  * Per-ingredient meta now also includes:
  * <ul>
+ *   <li>{@code nameHtml}: ingredient display name with Minecraft formatting codes converted to
+ *       HTML spans for the frontend.</li>
  *   <li>{@code tooltip}: array of plain strings (vanilla NORMAL flag, color codes stripped),
- *       used by the frontend to render JEI-like hover tooltips.</li>
+ *       used for search keys and plain-text fallbacks.</li>
+ *   <li>{@code tooltipHtml}: array of tooltip lines with Minecraft formatting codes converted to
+ *       HTML spans for the frontend.</li>
  *   <li>{@code kind}: ingredient type key, so the frontend can label arbitrary JEI ingredient
  *       kinds without hardcoding item/fluid buckets.</li>
  * </ul>
@@ -154,6 +159,32 @@ public class Dumper {
         }
     }
 
+    /** Plain-text and HTML tooltip payload generated from the same JEI tooltip lines. */
+    private static class TooltipText {
+        private final JsonArray plain = new JsonArray();
+        private final JsonArray html = new JsonArray();
+    }
+
+    /** Incremental category background split job. */
+    private static class BackgroundSplitTask {
+        private final JsonObject category;
+        private final String backgroundImgPath;
+        private final IconRenderer.DeduplicationSession session;
+
+        private BackgroundSplitTask(JsonObject category, String backgroundImgPath,
+                                    IconRenderer.DeduplicationSession session) {
+            this.category = category;
+            this.backgroundImgPath = backgroundImgPath;
+            this.session = session;
+        }
+    }
+
+    private enum WorkPhase {
+        RECIPES,
+        BACKGROUND_SPLIT,
+        READY_TO_FINISH
+    }
+
     private static final String[] RESOURCE_FILES = {
         "assets/jeidump/web/index.html:index.html",
         "assets/jeidump/web/style.css:assets/style.css",
@@ -177,6 +208,7 @@ public class Dumper {
     private final Gson gson = new GsonBuilder().disableHtmlEscaping().create();
     private final String dumpLocale = JeiDumpLocales.getCurrentLocaleCode();
     private final String generatedAt = Instant.now().toString();
+    private final boolean splitRecipeBackgrounds = JeiDumpConfig.splitRecipeBackgrounds;
 
     /** Generic ingredient metadata keyed by globally unique id (<kind>:<helper unique id>). */
     private final Map<String, JsonObject> ingredientMeta = new LinkedHashMap<>();
@@ -219,8 +251,12 @@ public class Dumper {
     private JsonObject currentCatObj;
     private JsonArray currentRecipesJson;
     private final JsonArray categoriesJson = new JsonArray();
+    private final List<BackgroundSplitTask> backgroundSplitTasks = new ArrayList<>();
 
     private final Result result = new Result();
+    private WorkPhase workPhase = WorkPhase.RECIPES;
+    private int backgroundSplitTaskIdx;
+    private long dedupSavedBytes;
 
     public Dumper(IJeiRuntime runtime, IIngredientRegistry ingredientRegistry, File outDir, ICommandSender sender) {
         this.runtime = runtime;
@@ -266,16 +302,44 @@ public class Dumper {
 
         catIdx = 0;
         wrapperIdx = 0;
+        workPhase = WorkPhase.RECIPES;
+        backgroundSplitTaskIdx = 0;
+        dedupSavedBytes = 0L;
+        backgroundSplitTasks.clear();
         primeCurrentCategory();
     }
 
     /**
-     * Process up to {@code budget} recipes. Returns {@code true} if there is more work to do.
-     * The caller is expected to invoke this once per client tick so the OS event loop keeps
-     * pumping (avoids "Not Responding" / DWM kill).
+     * Process up to {@code recipeBudget} recipe renders, then up to
+     * {@code backgroundSplitBudget} background-split image operations. Returns {@code true} if
+     * there is more work to do. The caller is expected to invoke this once per client tick so
+     * the OS event loop keeps pumping (avoids "Not Responding" / DWM kill).
      */
-    public boolean step(int budget) {
+    public boolean step(int recipeBudget, int backgroundSplitBudget) {
         if (categories == null) return false;
+
+        if (workPhase == WorkPhase.RECIPES) {
+            if (stepRecipes(recipeBudget)) return true;
+
+            flushRecipePhase();
+            if (!prepareBackgroundSplitTasks()) {
+                workPhase = WorkPhase.READY_TO_FINISH;
+                return false;
+            }
+
+            workPhase = WorkPhase.BACKGROUND_SPLIT;
+        }
+
+        if (workPhase == WorkPhase.BACKGROUND_SPLIT) {
+            if (stepBackgroundSplits(backgroundSplitBudget)) return true;
+
+            workPhase = WorkPhase.READY_TO_FINISH;
+        }
+
+        return false;
+    }
+
+    private boolean stepRecipes(int budget) {
         IRecipeRegistry rr = runtime.getRecipeRegistry();
         int processed = 0;
 
@@ -346,15 +410,9 @@ public class Dumper {
         return true;
     }
 
-    /** Write locale-aware dump data + copy bundled web assets. Call after {@link #step(int)} returns false. */
+    /** Write locale-aware dump data + copy bundled web assets. Call after {@link #step(int, int)} returns false. */
     public Result finish() throws IOException {
-        // Make sure the trailing category gets flushed if step() returned with the loop exhausted.
-        if (currentCategory != null && wrapperIdx >= currentWrappers.size()) {
-            finalizeCurrentCategory();
-        }
-
-        CommandDumpJei.info(sender, "jeidump.command.dedup.start");
-        long dedupSavedBytes = deduplicateRecipeBackgrounds();
+        flushRecipePhase();
 
         JsonObject root = buildDataRoot();
         writeJson(root, new File(localeDataDir, "index.json"));
@@ -373,7 +431,9 @@ public class Dumper {
         result.iconCount = ingredientMeta.size();
 
         long finalDumpBytes = measureTreeBytes(outDir.toPath());
-        if (dedupSavedBytes > 0L) {
+        if (!splitRecipeBackgrounds) {
+            CommandDumpJei.info(sender, "jeidump.command.dedup.disabled");
+        } else if (dedupSavedBytes > 0L) {
             long originalDumpBytes = finalDumpBytes + dedupSavedBytes;
             String previous = formatMiB(originalDumpBytes);
             String current = formatMiB(finalDumpBytes);
@@ -384,6 +444,12 @@ public class Dumper {
         }
 
         return result;
+    }
+
+    private void flushRecipePhase() {
+        if (currentCategory == null || wrapperIdx < currentWrappers.size()) return;
+
+        finalizeCurrentCategory();
     }
 
     // ----- per-category bookkeeping -----
@@ -588,12 +654,17 @@ public class Dumper {
         String fileStem = fileStemFor(id);
         renderer.renderIngredientIcon(state.renderer, ingredient, new File(state.rootDir, fileStem + ".png"));
 
+        String displayName = safeDisplayName(state, ingredient);
+        TooltipText tooltip = buildIngredientTooltip(state, ingredient);
+
         JsonObject meta = new JsonObject();
-        meta.addProperty("name", safeDisplayName(state, ingredient));
+        meta.addProperty("name", stripFormatting(displayName));
+        meta.addProperty("nameHtml", formatMinecraftTextToHtml(displayName));
         meta.addProperty("mod", safeModId(state, ingredient));
         meta.addProperty("img", localeDataPath("ingredients/" + state.kind + "/" + fileStem + ".png"));
         meta.addProperty("kind", state.kind);
-        meta.add("tooltip", buildIngredientTooltip(state, ingredient));
+        meta.add("tooltip", tooltip.plain);
+        meta.add("tooltipHtml", tooltip.html);
         ingredientMeta.put(id, meta);
         state.uniqueCount++;
         return id;
@@ -624,21 +695,24 @@ public class Dumper {
         }
     }
 
-    private static <T> JsonArray buildIngredientTooltip(IngredientTypeState<T> state, T ingredient) {
-        JsonArray tooltip = new JsonArray();
+    private static <T> TooltipText buildIngredientTooltip(IngredientTypeState<T> state, T ingredient) {
+        TooltipText tooltip = new TooltipText();
         try {
             List<String> lines = state.renderer.getTooltip(Minecraft.getMinecraft(), ingredient, ITooltipFlag.TooltipFlags.NORMAL);
             if (lines != null) {
                 for (String line : lines) {
-                    tooltip.add(new JsonPrimitive(stripFormatting(line)));
+                    tooltip.plain.add(new JsonPrimitive(stripFormatting(line)));
+                    tooltip.html.add(new JsonPrimitive(formatMinecraftTextToHtml(line)));
                 }
             }
         } catch (Throwable t) {
             // Fall back to the helper's display name only.
         }
 
-        if (tooltip.size() == 0) {
-            tooltip.add(new JsonPrimitive(safeDisplayName(state, ingredient)));
+        if (tooltip.plain.size() == 0) {
+            String displayName = safeDisplayName(state, ingredient);
+            tooltip.plain.add(new JsonPrimitive(stripFormatting(displayName)));
+            tooltip.html.add(new JsonPrimitive(formatMinecraftTextToHtml(displayName)));
         }
 
         return tooltip;
@@ -649,6 +723,182 @@ public class Dumper {
 
         String stripped = TextFormatting.getTextWithoutFormattingCodes(line);
         return stripped == null ? line : stripped;
+    }
+
+    private static String formatMinecraftTextToHtml(@Nullable String line) {
+        if (line == null || line.isEmpty()) return "";
+
+        StringBuilder out = new StringBuilder(line.length() + 16);
+        StringBuilder segment = new StringBuilder(line.length());
+        String colorClass = null;
+        boolean obfuscated = false;
+        boolean bold = false;
+        boolean strikethrough = false;
+        boolean underline = false;
+        boolean italic = false;
+
+        for (int index = 0; index < line.length(); index++) {
+            char character = line.charAt(index);
+            if (character == '\r') continue;
+
+            if (character == '\n') {
+                appendHtmlSegment(out, segment, colorClass, obfuscated, bold, strikethrough, underline, italic);
+                out.append("<br>");
+                colorClass = null;
+                obfuscated = false;
+                bold = false;
+                strikethrough = false;
+                underline = false;
+                italic = false;
+                continue;
+            }
+
+            if (character == '§' && index + 1 < line.length()) {
+                appendHtmlSegment(out, segment, colorClass, obfuscated, bold, strikethrough, underline, italic);
+                char code = Character.toLowerCase(line.charAt(++index));
+                switch (code) {
+                    case '0':
+                    case '1':
+                    case '2':
+                    case '3':
+                    case '4':
+                    case '5':
+                    case '6':
+                    case '7':
+                    case '8':
+                    case '9':
+                    case 'a':
+                    case 'b':
+                    case 'c':
+                    case 'd':
+                    case 'e':
+                    case 'f':
+                        colorClass = "mc-color-" + code;
+                        obfuscated = false;
+                        bold = false;
+                        strikethrough = false;
+                        underline = false;
+                        italic = false;
+                        break;
+
+                    case 'k':
+                        obfuscated = true;
+                        break;
+
+                    case 'l':
+                        bold = true;
+                        break;
+
+                    case 'm':
+                        strikethrough = true;
+                        break;
+
+                    case 'n':
+                        underline = true;
+                        break;
+
+                    case 'o':
+                        italic = true;
+                        break;
+
+                    case 'r':
+                        colorClass = null;
+                        obfuscated = false;
+                        bold = false;
+                        strikethrough = false;
+                        underline = false;
+                        italic = false;
+                        break;
+
+                    default:
+                        break;
+                }
+                continue;
+            }
+
+            segment.append(character);
+        }
+
+        appendHtmlSegment(out, segment, colorClass, obfuscated, bold, strikethrough, underline, italic);
+        return out.toString();
+    }
+
+    private static void appendHtmlSegment(StringBuilder out, StringBuilder segment, @Nullable String colorClass,
+                                          boolean obfuscated, boolean bold, boolean strikethrough,
+                                          boolean underline, boolean italic) {
+        if (segment.length() == 0) return;
+
+        String escaped = escapeHtml(segment.toString());
+        segment.setLength(0);
+        if (colorClass == null && !obfuscated && !bold && !strikethrough && !underline && !italic) {
+            out.append(escaped);
+            return;
+        }
+
+        out.append("<span class=\"");
+        boolean appendedClass = false;
+        if (colorClass != null) {
+            out.append(colorClass);
+            appendedClass = true;
+        }
+        if (obfuscated) {
+            if (appendedClass) out.append(' ');
+            out.append("mc-obfuscated");
+            appendedClass = true;
+        }
+        if (bold) {
+            if (appendedClass) out.append(' ');
+            out.append("mc-bold");
+            appendedClass = true;
+        }
+        if (strikethrough) {
+            if (appendedClass) out.append(' ');
+            out.append("mc-strikethrough");
+            appendedClass = true;
+        }
+        if (underline) {
+            if (appendedClass) out.append(' ');
+            out.append("mc-underline");
+            appendedClass = true;
+        }
+        if (italic) {
+            if (appendedClass) out.append(' ');
+            out.append("mc-italic");
+        }
+        out.append("\">").append(escaped).append("</span>");
+    }
+
+    private static String escapeHtml(String text) {
+        StringBuilder out = new StringBuilder(text.length() + 8);
+        for (int index = 0; index < text.length(); index++) {
+            char character = text.charAt(index);
+            switch (character) {
+                case '&':
+                    out.append("&amp;");
+                    break;
+
+                case '<':
+                    out.append("&lt;");
+                    break;
+
+                case '>':
+                    out.append("&gt;");
+                    break;
+
+                case '"':
+                    out.append("&quot;");
+                    break;
+
+                case '\'':
+                    out.append("&#39;");
+                    break;
+
+                default:
+                    out.append(character);
+                    break;
+            }
+        }
+        return out.toString();
     }
 
     private void addInverted(String id, String catId, int recipeIdx, String role, String kind) {
@@ -828,17 +1078,16 @@ public class Dumper {
         return root;
     }
 
-    /**
-     * Run background extraction after every recipe PNG exists, so the chat status can
-     * report how much disk space the deduplication saves.
-     */
-    private long deduplicateRecipeBackgrounds() {
-        long savedBytes = 0L;
+    private boolean prepareBackgroundSplitTasks() {
+        backgroundSplitTasks.clear();
+        backgroundSplitTaskIdx = 0;
+        dedupSavedBytes = 0L;
+        if (!splitRecipeBackgrounds) return false;
 
         for (JsonElement categoryElement : categoriesJson) {
             JsonObject category = categoryElement.getAsJsonObject();
             JsonArray recipes = category.getAsJsonArray("recipes");
-            if (recipes == null || recipes.size() == 0) continue;
+            if (recipes == null || recipes.size() < 2) continue;
 
             List<File> recipeFiles = new ArrayList<>();
             for (JsonElement recipeElement : recipes) {
@@ -847,23 +1096,47 @@ public class Dumper {
 
                 recipeFiles.add(new File(outDir, recipe.get("img").getAsString()));
             }
-            if (recipeFiles.isEmpty()) continue;
+            if (recipeFiles.size() < 2) continue;
 
             String categoryId = category.get("id").getAsString();
+            String backgroundImgPath = localeDataPath("categories/" + categoryId + "/background.png");
             File backgroundFile = new File(new File(catRoot, categoryId), "background.png");
-
-            try {
-                IconRenderer.DeduplicationResult result = renderer.deduplicateCategoryBackground(recipeFiles, backgroundFile);
-                if (!result.applied) continue;
-
-                category.addProperty("backgroundImg", localeDataPath("categories/" + categoryId + "/background.png"));
-                savedBytes += result.getSavedBytes();
-            } catch (IOException e) {
-                JeiDump.LOGGER.warn("Failed to deduplicate recipe backgrounds for category {}: {}", categoryId, e.toString());
-            }
+            backgroundSplitTasks.add(new BackgroundSplitTask(
+                category,
+                backgroundImgPath,
+                renderer.startCategoryBackgroundDeduplication(recipeFiles, backgroundFile)
+            ));
         }
 
-        return savedBytes;
+        if (backgroundSplitTasks.isEmpty()) return false;
+
+        CommandDumpJei.info(sender, "jeidump.command.dedup.start");
+        return true;
+    }
+
+    private boolean stepBackgroundSplits(int budget) {
+        int remaining = Math.max(1, budget);
+
+        while (remaining > 0 && backgroundSplitTaskIdx < backgroundSplitTasks.size()) {
+            BackgroundSplitTask task = backgroundSplitTasks.get(backgroundSplitTaskIdx);
+            try {
+                IconRenderer.DeduplicationStepResult result = task.session.step();
+                if (result.consumedImage) remaining--;
+                if (!result.complete) continue;
+
+                if (task.session.wasApplied()) {
+                    task.category.addProperty("backgroundImg", task.backgroundImgPath);
+                    dedupSavedBytes += task.session.getSavedBytes();
+                }
+            } catch (IOException e) {
+                String categoryId = task.category.get("id").getAsString();
+                JeiDump.LOGGER.warn("Failed to deduplicate recipe backgrounds for category {}: {}", categoryId, e.toString());
+            }
+
+            backgroundSplitTaskIdx++;
+        }
+
+        return backgroundSplitTaskIdx < backgroundSplitTasks.size();
     }
 
     /** Dump manifest used by the website to decide which locale-specific data bundle to load. */

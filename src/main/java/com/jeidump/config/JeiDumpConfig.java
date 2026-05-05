@@ -17,6 +17,8 @@ import com.jeidump.Tags;
  * <ul>
  *   <li>Default number of recipes processed per client tick during a dump</li>
  *   <li>Recipe layout render scale (pixel multiplier for output PNGs)</li>
+ *   <li>Whether recipe backgrounds should be split into shared per-category layers</li>
+ *   <li>How many split-pass image operations may run per client tick</li>
  * </ul>
  * </p>
  * <p>
@@ -41,6 +43,18 @@ public class JeiDumpConfig {
      * but use more disk space and memory. Requires a new dump to take effect.
      */
     public static int recipeScale = 3;
+
+    /**
+     * Whether the dumper should extract shared recipe backgrounds into a separate image per
+     * category when that reduces the total dump size.
+     */
+    public static boolean splitRecipeBackgrounds = true;
+
+    /**
+     * Maximum number of background-splitting image operations processed per client tick.
+     * Lower values reduce UI hitching during the post-processing phase.
+     */
+    public static int backgroundSplitImagesPerTick = 20;
 
     /**
      * Initializes the configuration from the given file.
@@ -90,6 +104,23 @@ public class JeiDumpConfig {
         );
         p.setLanguageKey(Tags.MODID + ".config.recipeScale");
         recipeScale = p.getInt();
+
+        p = config.get(CATEGORY_GENERAL,
+            "splitRecipeBackgrounds", true,
+            "Extract shared recipe backgrounds into a separate image per category when that reduces the total dump size. " +
+            "Disable this to keep every recipe as a standalone PNG."
+        );
+        p.setLanguageKey(Tags.MODID + ".config.splitRecipeBackgrounds");
+        splitRecipeBackgrounds = p.getBoolean();
+
+        p = config.get(CATEGORY_GENERAL,
+            "backgroundSplitImagesPerTick", 20,
+            "Maximum number of background-splitting image operations processed per client tick after recipe rendering finishes. " +
+            "Lower values reduce hitching but make the split phase take longer.",
+            1, 500
+        );
+        p.setLanguageKey(Tags.MODID + ".config.backgroundSplitImagesPerTick");
+        backgroundSplitImagesPerTick = p.getInt();
 
         if (config.hasChanged()) config.save();
     }

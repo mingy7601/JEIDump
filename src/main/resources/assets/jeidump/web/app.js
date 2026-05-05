@@ -273,6 +273,7 @@
             SEARCH.push({
                 key: (ingredient.name + ' ' + ingredient.mod + ' ' + kindLabelFor(ingredient.kind) + ' ' + id).toLowerCase(),
                 label: ingredient.name,
+                labelHtml: ingredient.nameHtml,
                 mod: ingredient.mod,
                 img: ingredient.img,
                 type: 'ingredient',
@@ -561,7 +562,11 @@
         }
 
         const key = mode === 'use' ? 'jeidump.web.ingredient.heading.use' : 'jeidump.web.ingredient.heading.for';
-        heading.appendChild(document.createTextNode(t(key) + ' ' + (meta ? meta.name : id)));
+        heading.appendChild(document.createTextNode(t(key) + ' '));
+
+        const label = node('span');
+        setRichText(label, meta ? meta.nameHtml : null, meta ? meta.name : id);
+        heading.appendChild(label);
         return heading;
     }
 
@@ -700,7 +705,9 @@
             row.appendChild(node('span', 'search-placeholder'));
         }
 
-        row.appendChild(node('span', null, hit.entry.label));
+        const label = node('span');
+        setRichText(label, hit.entry.labelHtml, hit.entry.label);
+        row.appendChild(label);
         row.appendChild(node('span', 'meta', searchTypeLabel(hit.entry.type === 'ingredient' ? hit.entry.kind : hit.entry.type) + ' | ' + (hit.entry.mod || t('jeidump.web.unknown_mod'))));
         return row;
     }
@@ -838,10 +845,17 @@
 
         // First line = display name (white), rest dimmed (matches vanilla aesthetic).
         const lines = meta.tooltip && meta.tooltip.length ? meta.tooltip : [meta.name];
+        const htmlLines = meta.tooltipHtml && meta.tooltipHtml.length ? meta.tooltipHtml : [];
         tip.replaceChildren();
-        tip.appendChild(node('div', 'tt-name', lines[0]));
+
+        const titleLine = node('div', 'tt-name');
+        setRichText(titleLine, htmlLines[0], lines[0]);
+        tip.appendChild(titleLine);
+
         for (let i = 1; i < lines.length; i++) {
-            tip.appendChild(node('div', 'tt-line', lines[i]));
+            const line = node('div', 'tt-line');
+            setRichText(line, htmlLines[i], lines[i]);
+            tip.appendChild(line);
         }
         if (meta.mod) tip.appendChild(node('div', 'tt-mod', meta.mod));
         tip.hidden = false;
@@ -1063,6 +1077,15 @@
         if (className) element.className = className;
         if (typeof text === 'string') element.textContent = text;
         return element;
+    }
+
+    function setRichText(element, html, text) {
+        if (typeof html === 'string' && html) {
+            element.innerHTML = html;
+            return;
+        }
+
+        element.textContent = typeof text === 'string' ? text : '';
     }
 
     function cssEscape(value) {
