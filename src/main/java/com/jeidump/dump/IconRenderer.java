@@ -1,9 +1,14 @@
 package com.jeidump.dump;
 
 import java.awt.image.BufferedImage;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.file.Files;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 
 import javax.imageio.ImageIO;
 
@@ -52,6 +57,23 @@ public class IconRenderer {
     @FunctionalInterface
     public interface DrawCommand {
         void draw();
+    }
+
+    /** Outcome of a category background deduplication attempt. */
+    public static class DeduplicationResult {
+        public final long originalBytes;
+        public final long deduplicatedBytes;
+        public final boolean applied;
+
+        private DeduplicationResult(long originalBytes, long deduplicatedBytes, boolean applied) {
+            this.originalBytes = originalBytes;
+            this.deduplicatedBytes = deduplicatedBytes;
+            this.applied = applied;
+        }
+
+        public long getSavedBytes() {
+            return applied ? Math.max(0L, originalBytes - deduplicatedBytes) : 0L;
+        }
     }
 
     /**
@@ -122,6 +144,108 @@ public class IconRenderer {
             t.draw();
             GlStateManager.color(1, 1, 1, 1);
         }, out);
+    }
+
+    /**
+     * Extract the pixel-identical background shared by every recipe in a category, keep it once,
+     * and rewrite each recipe PNG in place as a transparent foreground layer.
+     * <p>
+     * The split is only kept if the encoded PNG bytes shrink compared to the original recipe set.
+     */
+    public DeduplicationResult deduplicateCategoryBackground(List<File> recipeFiles, File backgroundFile) throws IOException {
+        long originalBytes = totalBytes(recipeFiles);
+        if (recipeFiles.size() < 2) return new DeduplicationResult(originalBytes, originalBytes, false);
+
+        BufferedImage first = readPng(recipeFiles.get(0));
+        if (first == null) return new DeduplicationResult(originalBytes, originalBytes, false);
+
+        int width = first.getWidth();
+        int height = first.getHeight();
+        int[] sharedPixels = first.getRGB(0, 0, width, height, null, 0, width);
+        boolean[] sharedMask = new boolean[sharedPixels.length];
+        Arrays.fill(sharedMask, true);
+
+        for (int fileIndex = 1; fileIndex < recipeFiles.size(); fileIndex++) {
+            File recipeFile = recipeFiles.get(fileIndex);
+            BufferedImage image = readPng(recipeFile);
+            if (image == null || image.getWidth() != width || image.getHeight() != height) {
+                return new DeduplicationResult(originalBytes, originalBytes, false);
+            }
+
+            int[] pixels = image.getRGB(0, 0, width, height, null, 0, width);
+            for (int pixelIndex = 0; pixelIndex < sharedPixels.length; pixelIndex++) {
+                if (sharedMask[pixelIndex] && pixels[pixelIndex] != sharedPixels[pixelIndex]) {
+                    sharedMask[pixelIndex] = false;
+                }
+            }
+        }
+
+        int[] backgroundPixels = new int[sharedPixels.length];
+        int sharedOpaquePixels = 0;
+        for (int pixelIndex = 0; pixelIndex < sharedPixels.length; pixelIndex++) {
+            if (!sharedMask[pixelIndex]) continue;
+
+            int pixel = sharedPixels[pixelIndex];
+            backgroundPixels[pixelIndex] = pixel;
+            if ((pixel >>> 24) != 0) sharedOpaquePixels++;
+        }
+
+        if (sharedOpaquePixels == 0) return new DeduplicationResult(originalBytes, originalBytes, false);
+
+        BufferedImage background = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
+        background.setRGB(0, 0, width, height, backgroundPixels, 0, width);
+
+        byte[] backgroundBytes = pngBytes(background);
+        List<byte[]> foregroundBytes = new ArrayList<>(recipeFiles.size());
+        long splitBytes = backgroundBytes.length;
+
+        for (File recipeFile : recipeFiles) {
+            BufferedImage image = readPng(recipeFile);
+            if (image == null || image.getWidth() != width || image.getHeight() != height) {
+                return new DeduplicationResult(originalBytes, originalBytes, false);
+            }
+
+            int[] pixels = image.getRGB(0, 0, width, height, null, 0, width);
+            for (int pixelIndex = 0; pixelIndex < pixels.length; pixelIndex++) {
+                if (sharedMask[pixelIndex]) pixels[pixelIndex] = 0;
+            }
+
+            BufferedImage foreground = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
+            foreground.setRGB(0, 0, width, height, pixels, 0, width);
+
+            byte[] encoded = pngBytes(foreground);
+            splitBytes += encoded.length;
+            foregroundBytes.add(encoded);
+        }
+
+        if (splitBytes >= originalBytes) return new DeduplicationResult(originalBytes, originalBytes, false);
+
+        Files.write(backgroundFile.toPath(), backgroundBytes);
+        for (int fileIndex = 0; fileIndex < recipeFiles.size(); fileIndex++) {
+            Files.write(recipeFiles.get(fileIndex).toPath(), foregroundBytes.get(fileIndex));
+        }
+
+        return new DeduplicationResult(originalBytes, splitBytes, true);
+    }
+
+    private static long totalBytes(List<File> files) throws IOException {
+        long total = 0L;
+        for (File file : files) total += Files.size(file.toPath());
+
+        return total;
+    }
+
+    private static BufferedImage readPng(File file) throws IOException {
+        return ImageIO.read(file);
+    }
+
+    private static byte[] pngBytes(BufferedImage image) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        if (!ImageIO.write(image, "PNG", out)) {
+            throw new IOException("No PNG writer available");
+        }
+
+        return out.toByteArray();
     }
 
     /**

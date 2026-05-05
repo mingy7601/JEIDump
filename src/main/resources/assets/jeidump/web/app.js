@@ -8,9 +8,11 @@
  *   - a top-bar fuzzy search that indexes items, fluids, mods and category titles.
  *
  * Recipe images are rendered server-side at IconRenderer.RECIPE_SCALE x logical size, and the
- * `scale` field on each recipe carries that multiplier. The frontend displays the image at an
- * integer multiple (1x, 2x, ...) of its *logical* size, so MC's pixel art and the MC font stay
- * crisp - no fractional CSS scaling that would smear 16-px glyphs.
+ * `scale` field on each recipe carries that multiplier. Categories may also expose a shared
+ * background layer; when they do, the frontend stacks that shared PNG below each per-recipe
+ * foreground PNG. The combined result still displays at an integer multiple (1x, 2x, ...) of
+ * the logical size so MC's pixel art and the MC font stay crisp - no fractional CSS scaling that
+ * would smear 16-px glyphs.
  *
  * No external dependencies. The "fuzzy" matcher is a simple lowercased subsequence + substring
  * scorer; good enough for mod packs with ~50k items, and zero footprint.
@@ -356,7 +358,7 @@
         content.replaceChildren(welcome);
     }
 
-    function recipeCardNode(recipe, idx) {
+    function recipeCardNode(recipe, idx, backgroundImg) {
         const card = node('div', 'recipe-card');
         card.tabIndex = 0;
         card.dataset.firstIn = (recipe.inputs && recipe.inputs[0]) || (recipe.fluidInputs && recipe.fluidInputs[0]) || '';
@@ -368,13 +370,17 @@
         wrap.style.width = width + 'px';
         wrap.style.height = height + 'px';
 
-        const image = node('img');
-        image.src = recipe.img;
-        image.alt = t('jeidump.web.recipe.alt', idx);
-        image.loading = 'lazy';
-        image.width = width;
-        image.height = height;
-        wrap.appendChild(image);
+        if (backgroundImg) {
+            wrap.appendChild(buildRecipeLayer(backgroundImg, '', width, height, 'recipe-layer recipe-layer-bg'));
+        }
+
+        wrap.appendChild(buildRecipeLayer(
+            recipe.img,
+            t('jeidump.web.recipe.alt', idx),
+            width,
+            height,
+            backgroundImg ? 'recipe-layer recipe-layer-fg' : 'recipe-layer'
+        ));
 
         if (recipe.slots) {
             for (const slot of recipe.slots) {
@@ -394,6 +400,16 @@
         card.appendChild(wrap);
         card.appendChild(node('div', 'idx', '#' + idx));
         return card;
+    }
+
+    function buildRecipeLayer(src, alt, width, height, className) {
+        const image = node('img', className);
+        image.src = src;
+        image.alt = alt;
+        image.loading = 'lazy';
+        image.width = width;
+        image.height = height;
+        return image;
     }
 
     function renderCategory(catId, page) {
@@ -430,7 +446,7 @@
 
         const grid = node('div', 'recipe-grid');
         for (let i = 0; i < slice.length; i++) {
-            grid.appendChild(recipeCardNode(slice[i], activePage * PAGE_SIZE + i));
+            grid.appendChild(recipeCardNode(slice[i], activePage * PAGE_SIZE + i, cat.backgroundImg));
         }
         content.appendChild(grid);
 
@@ -532,7 +548,7 @@
             for (const recipeIndex of indices) {
                 const recipe = cat.recipes[recipeIndex];
                 if (!recipe) continue;
-                grid.appendChild(recipeCardNode(recipe, recipeIndex));
+                grid.appendChild(recipeCardNode(recipe, recipeIndex, cat.backgroundImg));
             }
 
             section.appendChild(grid);

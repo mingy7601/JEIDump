@@ -12,6 +12,7 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 ### Added
 - Add a "last updated" timestamp to the footer, showing when the dump was generated.
 - Add I18n support for the website and a language selector to switch between available translations. The command feedback messages are now internationalized as well.
+- Deduplicate shared recipe backgrounds per category in exported dumps, and layer the shared background below per-recipe foreground PNGs on the website when it reduces the total image size.
 
 
 ## [1.0.1] - 2025-05-04

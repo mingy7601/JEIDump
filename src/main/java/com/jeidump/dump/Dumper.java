@@ -18,6 +18,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
 
@@ -26,6 +27,7 @@ import javax.annotation.Nullable;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
 
@@ -74,6 +76,7 @@ import com.jeidump.i18n.JeiDumpLocales;
  *   data/index.json
  *   data/manifest.json, data/manifest.js
  *   data/locales/<locale>/index.json
+ *   data/locales/<locale>/categories/<cat>/background.png (when deduplication wins)
  *   data/locales/<locale>/categories/<cat>/recipe_N.png
  *   data/locales/<locale>/items/<id>.png
  *   data/locales/<locale>/fluids/<id>.png
@@ -81,8 +84,16 @@ import com.jeidump.i18n.JeiDumpLocales;
  *
  * Per-recipe JSON now also includes:
  * <ul>
+ *   <li>{@code img}: the full recipe PNG, or the per-recipe foreground layer when the category
+ *       also exposes {@code backgroundImg}.</li>
  *   <li>{@code slots}: array of {@code {x,y,w,h,id,kind,role}} so the frontend can overlay
  *       hotspots that exactly match JEI's layout for hover/tooltip + click navigation.</li>
+ * </ul>
+ *
+ * Per-category JSON may also include:
+ * <ul>
+ *   <li>{@code backgroundImg}: category-wide shared background layer, emitted only when splitting
+ *       the recipe PNGs actually reduces their total encoded size.</li>
  * </ul>
  *
  * Per-ingredient meta now also includes:
@@ -256,6 +267,8 @@ public class Dumper {
                     int canvasH = currentBgH + RECIPE_PADDING * 2;
 
                     JsonObject recObj = new JsonObject();
+                    // During the final deduplication pass this file may be rewritten in place as
+                    // a foreground-only layer if the shared background split is smaller on disk.
                     recObj.addProperty("img", localeDataPath("categories/" + currentCatId + "/recipe_" + wrapperIdx + ".png"));
                     recObj.addProperty("w", canvasW);
                     recObj.addProperty("h", canvasH);
@@ -305,6 +318,9 @@ public class Dumper {
             finalizeCurrentCategory();
         }
 
+        CommandDumpJei.info(sender, "jeidump.command.dedup.start");
+        long dedupSavedBytes = deduplicateRecipeBackgrounds();
+
         JsonObject root = buildDataRoot();
         writeJson(root, new File(localeDataDir, "index.json"));
         writeLocaleDataScript(root, new File(localeDataDir, "index.js"), dumpLocale);
@@ -325,6 +341,18 @@ public class Dumper {
         }
 
         result.iconCount = itemIds.size() + fluidIds.size();
+
+        long finalDumpBytes = measureTreeBytes(outDir.toPath());
+        if (dedupSavedBytes > 0L) {
+            long originalDumpBytes = finalDumpBytes + dedupSavedBytes;
+            String previous = formatMiB(originalDumpBytes);
+            String current = formatMiB(finalDumpBytes);
+            String percent = String.format(Locale.ROOT, "%.1f", finalDumpBytes * 100.0 / originalDumpBytes);
+            CommandDumpJei.info(sender, "jeidump.command.dedup.done", previous, current, percent);
+        } else {
+            CommandDumpJei.info(sender, "jeidump.command.dedup.none");
+        }
+
         return result;
     }
 
@@ -356,6 +384,7 @@ public class Dumper {
 
     private void finalizeCurrentCategory() {
         if (currentCategory == null) return;
+
         currentCatObj.addProperty("recipeCount", currentRecipesJson.size());
         currentCatObj.add("recipes", currentRecipesJson);
         categoriesJson.add(currentCatObj);
@@ -647,6 +676,44 @@ public class Dumper {
         return root;
     }
 
+    /**
+     * Run background extraction after every recipe PNG exists, so the chat status can
+     * report how much disk space the deduplication saves.
+     */
+    private long deduplicateRecipeBackgrounds() {
+        long savedBytes = 0L;
+
+        for (JsonElement categoryElement : categoriesJson) {
+            JsonObject category = categoryElement.getAsJsonObject();
+            JsonArray recipes = category.getAsJsonArray("recipes");
+            if (recipes == null || recipes.size() == 0) continue;
+
+            List<File> recipeFiles = new ArrayList<>();
+            for (JsonElement recipeElement : recipes) {
+                JsonObject recipe = recipeElement.getAsJsonObject();
+                if (!recipe.has("img")) continue;
+
+                recipeFiles.add(new File(outDir, recipe.get("img").getAsString()));
+            }
+            if (recipeFiles.isEmpty()) continue;
+
+            String categoryId = category.get("id").getAsString();
+            File backgroundFile = new File(new File(catRoot, categoryId), "background.png");
+
+            try {
+                IconRenderer.DeduplicationResult result = renderer.deduplicateCategoryBackground(recipeFiles, backgroundFile);
+                if (!result.applied) continue;
+
+                category.addProperty("backgroundImg", localeDataPath("categories/" + categoryId + "/background.png"));
+                savedBytes += result.getSavedBytes();
+            } catch (IOException e) {
+                JeiDump.LOGGER.warn("Failed to deduplicate recipe backgrounds for category {}: {}", categoryId, e.toString());
+            }
+        }
+
+        return savedBytes;
+    }
+
     /** Dump manifest used by the website to decide which locale-specific data bundle to load. */
     private void writeDataManifest() throws IOException {
         JsonObject manifest = new JsonObject();
@@ -744,6 +811,24 @@ public class Dumper {
             gson.toJson(root, bw);
             bw.write(";\n");
         }
+    }
+
+    private static String formatMiB(long bytes) {
+        return String.format(Locale.ROOT, "%.2f MiB", bytes / 1048576.0d);
+    }
+
+    private static long measureTreeBytes(Path root) throws IOException {
+        final long[] total = {0L};
+        Files.walkFileTree(root, new SimpleFileVisitor<Path>() {
+
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                total[0] += attrs.size();
+                return FileVisitResult.CONTINUE;
+            }
+        });
+
+        return total[0];
     }
 
     private static void deleteTree(Path root) throws IOException {

@@ -34,7 +34,7 @@ The frontend is dependency-free: no lunr, no React, no build step. The "fuzzy" s
 - [x] Add a "last updated" timestamp to the footer.
 - [x] Add dispatch to translated pages, so the frontend can load images in the appropriate language, if said dump is available. Add language selector to the UI to switch between them and add I18n support for the rest of the UI text.
 - [ ] Add dispatch to version, so the frontend can show the recipe in different versions if multiple dumps are available.
-- [ ] Separate the background texture (shared by category) from the content (items, fluids, text, etc), to reduce dump size and caching overhead.
+- [x] Separate the background texture (shared by category) from the content (items, fluids, text, etc), to reduce dump size and caching overhead.
 - [ ] Add support for other types than items and fluids, such Gases/Essentia/Mana/etc. This will require a more flexible data model and frontend.
 
 
