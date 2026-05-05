@@ -8,6 +8,12 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 - Semantic Versioning: https://semver.org/spec/v2.0.0.html
 
 
+## [1.1.0] - 2025-05-05
+### Added
+- Add a "last updated" timestamp to the footer, showing when the dump was generated.
+- Add I18n support for the website and a language selector to switch between available translations. The command feedback messages are now internationalized as well.
+
+
 ## [1.0.1] - 2025-05-04
 ### Fixed
 - Fix github link in footer.

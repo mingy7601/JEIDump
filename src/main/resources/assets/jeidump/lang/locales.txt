@@ -1,0 +1,2 @@
+# Keep this list in sync with the bundled lang files in this directory.
+en_us

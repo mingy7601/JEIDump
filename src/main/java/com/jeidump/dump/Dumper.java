@@ -8,11 +8,18 @@ import java.io.InputStream;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 
 import javax.annotation.Nullable;
 
@@ -44,26 +51,32 @@ import mezz.jei.api.recipe.IRecipeWrapper;
 
 import com.jeidump.JeiDump;
 import com.jeidump.command.CommandDumpJei;
+import com.jeidump.config.JeiDumpConfig;
+import com.jeidump.i18n.JeiDumpLocales;
+
 
 /**
  * Stateful JEI dumper.
  *
  * The work is split into three phases:
  * <ol>
- *   <li>{@link #setup()} - prepares the output directory tree and pre-counts recipes.</li>
- *   <li>{@link #step(int)} - processes up to {@code budget} recipes per call. Returns
+ *   <li>{@link #setup()}: prepares the output directory tree and pre-counts recipes.</li>
+ *   <li>{@link #step(int)}: processes up to {@code budget} recipes per call. Returns
  *       {@code true} while there is more work to do; the caller (a Forge {@code ClientTickEvent}
  *       handler) invokes this once per tick to keep the OS event loop alive.</li>
- *   <li>{@link #finish()} - writes {@code data/index.json} and copies the bundled web frontend.</li>
+ *   <li>{@link #finish()}: writes locale-aware data files and copies the bundled web frontend.</li>
  * </ol>
  *
  * Output structure (relative to {@code outDir}):
  * <pre>
  *   index.html, assets/style.css, assets/app.js
+ *   assets/lang/<locale>.lang, assets/lang/index.json, assets/lang/index.js
  *   data/index.json
- *   data/categories/&lt;cat&gt;/recipe_N.png
- *   data/items/&lt;id&gt;.png
- *   data/fluids/&lt;id&gt;.png
+ *   data/manifest.json, data/manifest.js
+ *   data/locales/<locale>/index.json
+ *   data/locales/<locale>/categories/<cat>/recipe_N.png
+ *   data/locales/<locale>/items/<id>.png
+ *   data/locales/<locale>/fluids/<id>.png
  * </pre>
  *
  * Per-recipe JSON now also includes:
@@ -76,6 +89,12 @@ import com.jeidump.command.CommandDumpJei;
  * <ul>
  *   <li>{@code tooltip}: array of plain strings (vanilla NORMAL flag, color codes stripped),
  *       used by the frontend to render JEI-like hover tooltips.</li>
+ * </ul>
+ *
+ * Root metadata also includes:
+ * <ul>
+ *   <li>{@code generatedAt}: ISO-8601 timestamp captured once when the dump starts, used by the
+ *       website footer.</li>
  * </ul>
  */
 public class Dumper {
@@ -106,6 +125,9 @@ public class Dumper {
     private final File outDir;
     private final ICommandSender sender;
     private final IconRenderer renderer = new IconRenderer();
+    private final Gson gson = new GsonBuilder().disableHtmlEscaping().create();
+    private final String dumpLocale = JeiDumpLocales.getCurrentLocaleCode();
+    private final String generatedAt = Instant.now().toString();
 
     /** Item icon dedup: stable key -> sanitised filename stem. */
     private final Map<String, String> itemIds = new LinkedHashMap<>();
@@ -136,7 +158,7 @@ public class Dumper {
     private static IFocus<ItemStack> fallbackFocus;
 
     // Phase state
-    private File dataDir, catRoot, itemRoot, fluidRoot;
+    private File dataDir, localesRoot, localeDataDir, catRoot, itemRoot, fluidRoot;
     @SuppressWarnings("rawtypes")
     private List<IRecipeCategory> categories;
     private int totalRecipes;
@@ -167,10 +189,17 @@ public class Dumper {
     @SuppressWarnings({"unchecked", "rawtypes"})
     public void setup() throws IOException {
         dataDir = new File(outDir, "data");
-        catRoot = new File(dataDir, "categories");
-        itemRoot = new File(dataDir, "items");
-        fluidRoot = new File(dataDir, "fluids");
+        localesRoot = new File(dataDir, "locales");
+        localeDataDir = new File(localesRoot, dumpLocale);
+        catRoot = new File(localeDataDir, "categories");
+        itemRoot = new File(localeDataDir, "items");
+        fluidRoot = new File(localeDataDir, "fluids");
         if (!dataDir.mkdirs() && !dataDir.exists()) throw new IOException("Cannot create " + dataDir);
+        if (!localesRoot.mkdirs() && !localesRoot.exists()) throw new IOException("Cannot create " + localesRoot);
+        if (localeDataDir.exists()) {
+            deleteTree(localeDataDir.toPath());
+        }
+        if (!localeDataDir.mkdirs() && !localeDataDir.exists()) throw new IOException("Cannot create " + localeDataDir);
         catRoot.mkdirs();
         itemRoot.mkdirs();
         fluidRoot.mkdirs();
@@ -183,7 +212,7 @@ public class Dumper {
         for (IRecipeCategory cat : categories) {
             totalRecipes += rr.getRecipeWrappers(cat).size();
         }
-        CommandDumpJei.info(sender, "[jeidump] " + totalRecipes + " recipes across " + categories.size() + " categories");
+        CommandDumpJei.info(sender, "jeidump.command.scan_total", totalRecipes, categories.size());
 
         catIdx = 0;
         wrapperIdx = 0;
@@ -227,13 +256,13 @@ public class Dumper {
                     int canvasH = currentBgH + RECIPE_PADDING * 2;
 
                     JsonObject recObj = new JsonObject();
-                    recObj.addProperty("img", "data/categories/" + currentCatId + "/recipe_" + wrapperIdx + ".png");
+                    recObj.addProperty("img", localeDataPath("categories/" + currentCatId + "/recipe_" + wrapperIdx + ".png"));
                     recObj.addProperty("w", canvasW);
                     recObj.addProperty("h", canvasH);
                     // Pixel multiplier baked into the PNG. The frontend uses this to display the
                     // image at integer multiples of the logical size (1x, 2x, ...) instead of
                     // stretching it to fit the card width.
-                    recObj.addProperty("scale", IconRenderer.RECIPE_SCALE);
+                    recObj.addProperty("scale", JeiDumpConfig.recipeScale);
 
                     JsonArray inputs = new JsonArray();
                     JsonArray outputs = new JsonArray();
@@ -269,48 +298,24 @@ public class Dumper {
         return true;
     }
 
-    /** Write index.json + copy bundled web assets. Call after {@link #step(int)} returns false. */
+    /** Write locale-aware dump data + copy bundled web assets. Call after {@link #step(int)} returns false. */
     public Result finish() throws IOException {
         // Make sure the trailing category gets flushed if step() returned with the loop exhausted.
         if (currentCategory != null && wrapperIdx >= currentWrappers.size()) {
             finalizeCurrentCategory();
         }
 
-        JsonObject root = new JsonObject();
-        root.add("categories", categoriesJson);
+        JsonObject root = buildDataRoot();
+        writeJson(root, new File(localeDataDir, "index.json"));
+        writeLocaleDataScript(root, new File(localeDataDir, "index.js"), dumpLocale);
 
-        JsonObject itemsRoot = new JsonObject();
-        for (Map.Entry<String, JsonObject> e : itemMeta.entrySet()) {
-            itemsRoot.add(e.getKey(), e.getValue());
-        }
-        root.add("items", itemsRoot);
+        // Keep a root-level alias for the most recent dump so external tools and pre-locale sites
+        // can still open the folder without knowing about the locale manifest.
+        writeJson(root, new File(dataDir, "index.json"));
+        writeLegacyDataScript(root, new File(dataDir, "index.js"), dumpLocale);
 
-        JsonObject fluidsRoot = new JsonObject();
-        for (Map.Entry<String, JsonObject> e : fluidMeta.entrySet()) {
-            fluidsRoot.add(e.getKey(), e.getValue());
-        }
-        root.add("fluids", fluidsRoot);
-
-        JsonObject itemRecipesRoot = new JsonObject();
-        for (Map.Entry<String, JsonArray> e : itemRecipes.entrySet()) {
-            itemRecipesRoot.add(e.getKey(), e.getValue());
-        }
-        root.add("itemRecipes", itemRecipesRoot);
-
-        Gson gson = new GsonBuilder().disableHtmlEscaping().create();
-        try (BufferedWriter bw = Files.newBufferedWriter(new File(dataDir, "index.json").toPath(), StandardCharsets.UTF_8)) {
-            gson.toJson(root, bw);
-        }
-
-        // Also emit a JS-wrapped copy so the frontend works when opened directly via file://.
-        // Browsers refuse fetch() on file:// for security; loading the same payload through a
-        // <script> tag bypasses CORS entirely. The .json file is kept too for users who do serve
-        // the folder, and for any external tooling that wants the raw data.
-        try (BufferedWriter bw = Files.newBufferedWriter(new File(dataDir, "index.js").toPath(), StandardCharsets.UTF_8)) {
-            bw.write("window.__JEI_DUMP_DATA = ");
-            gson.toJson(root, bw);
-            bw.write(";\n");
-        }
+        writeDataManifest();
+        writeLangBundle();
 
         for (String pair : RESOURCE_FILES) {
             int colon = pair.indexOf(':');
@@ -380,7 +385,7 @@ public class Dumper {
                 JsonObject meta = new JsonObject();
                 meta.addProperty("name", safeName(disp));
                 meta.addProperty("mod", modIdOf(disp));
-                meta.addProperty("img", "data/items/" + id + ".png");
+                meta.addProperty("img", localeDataPath("items/" + id + ".png"));
                 meta.add("tooltip", buildItemTooltip(disp));
                 itemMeta.put(id, meta);
             }
@@ -414,7 +419,7 @@ public class Dumper {
                 JsonObject meta = new JsonObject();
                 meta.addProperty("name", disp.getLocalizedName());
                 meta.addProperty("mod", modIdOf(disp));
-                meta.addProperty("img", "data/fluids/" + id + ".png");
+                meta.addProperty("img", localeDataPath("fluids/" + id + ".png"));
                 meta.add("tooltip", buildFluidTooltip(disp));
                 fluidMeta.put(id, meta);
             }
@@ -614,6 +619,149 @@ public class Dumper {
     private static String sanitize(String s) {
         // Disallow path traversal and any character that's awkward across Windows + Unix filesystems.
         return s.replaceAll("[^A-Za-z0-9_.-]", "_");
+    }
+
+    private JsonObject buildDataRoot() {
+        JsonObject root = new JsonObject();
+        root.addProperty("locale", dumpLocale);
+        root.addProperty("generatedAt", generatedAt);
+        root.add("categories", categoriesJson);
+
+        JsonObject itemsRoot = new JsonObject();
+        for (Map.Entry<String, JsonObject> e : itemMeta.entrySet()) {
+            itemsRoot.add(e.getKey(), e.getValue());
+        }
+        root.add("items", itemsRoot);
+
+        JsonObject fluidsRoot = new JsonObject();
+        for (Map.Entry<String, JsonObject> e : fluidMeta.entrySet()) {
+            fluidsRoot.add(e.getKey(), e.getValue());
+        }
+        root.add("fluids", fluidsRoot);
+
+        JsonObject itemRecipesRoot = new JsonObject();
+        for (Map.Entry<String, JsonArray> e : itemRecipes.entrySet()) {
+            itemRecipesRoot.add(e.getKey(), e.getValue());
+        }
+        root.add("itemRecipes", itemRecipesRoot);
+        return root;
+    }
+
+    /** Dump manifest used by the website to decide which locale-specific data bundle to load. */
+    private void writeDataManifest() throws IOException {
+        JsonObject manifest = new JsonObject();
+        manifest.addProperty("latestDumpLocale", dumpLocale);
+
+        JsonArray availableDataLocales = new JsonArray();
+        for (String locale : listAvailableDataLocales()) availableDataLocales.add(locale);
+        manifest.add("availableDataLocales", availableDataLocales);
+
+        writeJson(manifest, new File(dataDir, "manifest.json"));
+        writeGlobalScript(manifest, new File(dataDir, "manifest.js"), "window.__JEI_DUMP_MANIFEST = ");
+    }
+
+    /** Copy the bundled lang files and emit a JS-friendly translation table for the website. */
+    private void writeLangBundle() throws IOException {
+        File langDir = new File(new File(outDir, "assets"), "lang");
+        if (!langDir.mkdirs() && !langDir.exists()) throw new IOException("Cannot create " + langDir);
+
+        JsonObject payload = new JsonObject();
+        JsonArray availableLocales = new JsonArray();
+        JsonObject translations = new JsonObject();
+
+        for (Map.Entry<String, Properties> entry : JeiDumpLocales.loadBundledLangTables().entrySet()) {
+            String locale = entry.getKey();
+            availableLocales.add(locale);
+            copyResource(JeiDumpLocales.resourcePath(locale), new File(langDir, locale + ".lang"));
+
+            JsonObject table = new JsonObject();
+            for (String key : entry.getValue().stringPropertyNames()) {
+                table.addProperty(key, entry.getValue().getProperty(key));
+            }
+
+            translations.add(locale, table);
+        }
+
+        payload.add("availableLocales", availableLocales);
+        payload.add("translations", translations);
+
+        writeJson(payload, new File(langDir, "index.json"));
+        writeGlobalScript(payload, new File(langDir, "index.js"), "window.__JEI_DUMP_I18N = ");
+    }
+
+    private List<String> listAvailableDataLocales() {
+        List<String> locales = new ArrayList<>();
+        File[] children = localesRoot.listFiles(File::isDirectory);
+        if (children == null) {
+            locales.add(dumpLocale);
+            return locales;
+        }
+
+        for (File child : children) {
+            if (!new File(child, "index.json").isFile()) continue;
+            locales.add(child.getName());
+        }
+
+        if (!locales.contains(dumpLocale)) locales.add(dumpLocale);
+
+        JeiDumpLocales.sortLocaleCodes(locales);
+        return locales;
+    }
+
+    private String localeDataPath(String relativePath) {
+        return "data/locales/" + dumpLocale + "/" + relativePath;
+    }
+
+    private void writeJson(JsonObject root, File dst) throws IOException {
+        try (BufferedWriter bw = Files.newBufferedWriter(dst.toPath(), StandardCharsets.UTF_8)) {
+            gson.toJson(root, bw);
+        }
+    }
+
+    private void writeLegacyDataScript(JsonObject root, File dst, String locale) throws IOException {
+        try (BufferedWriter bw = Files.newBufferedWriter(dst.toPath(), StandardCharsets.UTF_8)) {
+            bw.write("window.__JEI_DUMP_DATA = ");
+            gson.toJson(root, bw);
+            bw.write(";\nwindow.__JEI_DUMP_DATA_LOCALE = ");
+            gson.toJson(locale, bw);
+            bw.write(";\n");
+        }
+    }
+
+    private void writeLocaleDataScript(JsonObject root, File dst, String locale) throws IOException {
+        try (BufferedWriter bw = Files.newBufferedWriter(dst.toPath(), StandardCharsets.UTF_8)) {
+            bw.write("window.__JEI_DUMP_DATASETS = window.__JEI_DUMP_DATASETS || {};\nwindow.__JEI_DUMP_DATASETS[");
+            gson.toJson(locale, bw);
+            bw.write("] = ");
+            gson.toJson(root, bw);
+            bw.write(";\n");
+        }
+    }
+
+    private void writeGlobalScript(JsonObject root, File dst, String prefix) throws IOException {
+        try (BufferedWriter bw = Files.newBufferedWriter(dst.toPath(), StandardCharsets.UTF_8)) {
+            bw.write(prefix);
+            gson.toJson(root, bw);
+            bw.write(";\n");
+        }
+    }
+
+    private static void deleteTree(Path root) throws IOException {
+        Files.walkFileTree(root, new SimpleFileVisitor<Path>() {
+
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+                Files.delete(file);
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException {
+                if (exc != null) throw exc;
+                Files.delete(dir);
+                return FileVisitResult.CONTINUE;
+            }
+        });
     }
 
     /** Copy a classpath resource to disk. */

@@ -26,6 +26,10 @@ import net.minecraftforge.fluids.FluidStack;
 
 import mezz.jei.api.gui.IRecipeLayoutDrawable;
 
+import com.jeidump.JeiDump;
+import com.jeidump.config.JeiDumpConfig;
+
+
 /**
  * Off-screen rendering of JEI's GUI primitives into PNG files.
  *
@@ -43,18 +47,6 @@ import mezz.jei.api.gui.IRecipeLayoutDrawable;
  *    be cleared because some recipe layouts draw 3D items that rely on it.
  */
 public class IconRenderer {
-
-    /**
-     * Pixel multiplier applied to recipe layout PNGs. The framebuffer is allocated at
-     * (logicalW * RECIPE_SCALE) x (logicalH * RECIPE_SCALE); the orthographic projection stays in
-     * logical (GUI) coordinates so JEI's drawing code is unaffected, but every rasterised pixel
-     * (item textures, font glyphs, slot frames) ends up sampled at this many times the resolution.
-     * The frontend then displays the PNG at integer multiples of the *logical* size, which gives a
-     * crisp "lossless" zoom rather than the bilinear smear of stretching a 16-px font glyph.
-     * <p>
-     * Trade-off: storage and memory grow as the square of the value.
-     */
-    public static final int RECIPE_SCALE = 3;
 
     /** A drawing callback executed while our scratch framebuffer is active. */
     @FunctionalInterface
@@ -82,7 +74,8 @@ public class IconRenderer {
         int canvasW = w + padding * 2;
         int canvasH = h + padding * 2;
         // Pass impossible mouse coordinates so JEI doesn't draw the hover highlight or tooltip.
-        renderToFile(canvasW, canvasH, RECIPE_SCALE,
+        // Recipe scale is read from config; higher values produce crisper output PNGs.
+        renderToFile(canvasW, canvasH, JeiDumpConfig.recipeScale,
             () -> layout.drawRecipe(Minecraft.getMinecraft(), -10000, -10000), out);
     }
 
@@ -174,7 +167,7 @@ public class IconRenderer {
             draw.draw();
         } catch (Throwable t) {
             // Don't let one bad recipe wreck the whole dump; log and write whatever the FB contains.
-            com.jeidump.JeiDump.LOGGER.warn("Render failure for {}: {}", out.getName(), t.toString());
+            JeiDump.LOGGER.warn("Render failure for {}: {}", out.getName(), t.toString());
         }
 
         // Read back pixels as RGBA bytes.
