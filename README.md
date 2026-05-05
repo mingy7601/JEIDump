@@ -21,10 +21,10 @@ When done, open `<gameDir>/jeidump/<folder>/index.html`.
 index.html
 assets/style.css
 assets/app.js
-data/index.json
-data/categories/<sanitized_uid>/recipe_N.png
-data/items/<dedup_id>.png
-data/fluids/<dedup_id>.png
+data/manifest.json
+data/locales/<locale>/index.json
+data/locales/<locale>/categories/<sanitized_uid>/recipe_N.png
+data/locales/<locale>/ingredients/<kind>/<dedup_id>.png
 ```
 
 The frontend is dependency-free: no lunr, no React, no build step. The "fuzzy" search is a lowercase substring + subsequence scorer that handles tens of thousands of entries in the browser without trouble.
@@ -35,7 +35,7 @@ The frontend is dependency-free: no lunr, no React, no build step. The "fuzzy" s
 - [x] Add dispatch to translated pages, so the frontend can load images in the appropriate language, if said dump is available. Add language selector to the UI to switch between them and add I18n support for the rest of the UI text.
 - [ ] Add dispatch to version, so the frontend can show the recipe in different versions if multiple dumps are available.
 - [x] Separate the background texture (shared by category) from the content (items, fluids, text, etc), to reduce dump size and caching overhead.
-- [ ] Add support for other types than items and fluids, such Gases/Essentia/Mana/etc. This will require a more flexible data model and frontend.
+- [x] Add support for other types than items and fluids, such Gases/Essentia/Mana/etc, using JEI's generic ingredient helpers and renderers.
 
 
 ## Build

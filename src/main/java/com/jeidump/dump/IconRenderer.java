@@ -30,6 +30,7 @@ import net.minecraft.util.ResourceLocation;
 import net.minecraftforge.fluids.FluidStack;
 
 import mezz.jei.api.gui.IRecipeLayoutDrawable;
+import mezz.jei.api.ingredients.IIngredientRenderer;
 
 import com.jeidump.JeiDump;
 import com.jeidump.config.JeiDumpConfig;
@@ -142,6 +143,17 @@ public class IconRenderer {
             bb.pos(16, 0, 0).tex(sprite.getMaxU(), sprite.getMinV()).endVertex();
             bb.pos(0, 0, 0).tex(sprite.getMinU(), sprite.getMinV()).endVertex();
             t.draw();
+            GlStateManager.color(1, 1, 1, 1);
+        }, out);
+    }
+
+    /**
+     * Renders any JEI ingredient type using its registered ingredient-list renderer.
+     * Custom JEI ingredient renderers are expected to draw inside a 16x16 logical box.
+     */
+    public <T> void renderIngredientIcon(IIngredientRenderer<T> ingredientRenderer, T ingredient, File out) throws IOException {
+        renderToFile(16, 16, 1, () -> {
+            ingredientRenderer.render(Minecraft.getMinecraft(), 0, 0, ingredient);
             GlStateManager.color(1, 1, 1, 1);
         }, out);
     }

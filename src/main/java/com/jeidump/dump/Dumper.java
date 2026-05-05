@@ -5,7 +5,7 @@ import java.io.BufferedWriter;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
-import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.FileVisitResult;
@@ -16,11 +16,14 @@ import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 
 import javax.annotation.Nullable;
 
@@ -34,20 +37,21 @@ import com.google.gson.JsonPrimitive;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.util.ITooltipFlag;
 import net.minecraft.command.ICommandSender;
-import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.init.Items;
 import net.minecraft.item.ItemStack;
-import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.text.TextFormatting;
-import net.minecraftforge.fluids.FluidStack;
 
 import mezz.jei.api.IJeiRuntime;
 import mezz.jei.api.IRecipeRegistry;
-import mezz.jei.api.gui.IGuiFluidStackGroup;
 import mezz.jei.api.gui.IGuiIngredient;
-import mezz.jei.api.gui.IGuiItemStackGroup;
+import mezz.jei.api.gui.IGuiIngredientGroup;
 import mezz.jei.api.gui.IRecipeLayoutDrawable;
+import mezz.jei.api.ingredients.IIngredientHelper;
+import mezz.jei.api.ingredients.IIngredientRegistry;
+import mezz.jei.api.ingredients.IIngredientRenderer;
+import mezz.jei.api.ingredients.VanillaTypes;
 import mezz.jei.api.recipe.IFocus;
+import mezz.jei.api.recipe.IIngredientType;
 import mezz.jei.api.recipe.IRecipeCategory;
 import mezz.jei.api.recipe.IRecipeWrapper;
 
@@ -73,13 +77,11 @@ import com.jeidump.i18n.JeiDumpLocales;
  * <pre>
  *   index.html, assets/style.css, assets/app.js
  *   assets/lang/<locale>.lang, assets/lang/index.json, assets/lang/index.js
- *   data/index.json
  *   data/manifest.json, data/manifest.js
  *   data/locales/<locale>/index.json
  *   data/locales/<locale>/categories/<cat>/background.png (when deduplication wins)
  *   data/locales/<locale>/categories/<cat>/recipe_N.png
- *   data/locales/<locale>/items/<id>.png
- *   data/locales/<locale>/fluids/<id>.png
+ *   data/locales/<locale>/ingredients/<kind>/<id>.png
  * </pre>
  *
  * Per-recipe JSON now also includes:
@@ -100,6 +102,8 @@ import com.jeidump.i18n.JeiDumpLocales;
  * <ul>
  *   <li>{@code tooltip}: array of plain strings (vanilla NORMAL flag, color codes stripped),
  *       used by the frontend to render JEI-like hover tooltips.</li>
+ *   <li>{@code kind}: ingredient type key, so the frontend can label arbitrary JEI ingredient
+ *       kinds without hardcoding item/fluid buckets.</li>
  * </ul>
  *
  * Root metadata also includes:
@@ -115,6 +119,39 @@ public class Dumper {
         public int categoryCount;
         public int recipeCount;
         public int iconCount;
+    }
+
+    /** Runtime helper/renderer bundle for one JEI ingredient type. */
+    private static class IngredientTypeState<T> {
+        private final IIngredientType<T> type;
+        private final IIngredientHelper<T> helper;
+        private final IIngredientRenderer<T> renderer;
+        private final String kind;
+        private final String labelKey;
+        private final File rootDir;
+        private int uniqueCount;
+
+        private IngredientTypeState(IIngredientType<T> type, IIngredientHelper<T> helper,
+                                    IIngredientRenderer<T> renderer, String kind, String labelKey,
+                                    File rootDir) {
+            this.type = type;
+            this.helper = helper;
+            this.renderer = renderer;
+            this.kind = kind;
+            this.labelKey = labelKey;
+            this.rootDir = rootDir;
+        }
+    }
+
+    /** Present ingredient group on a specific recipe layout. */
+    private static class IngredientGroupAccess<T> {
+        private final IIngredientType<T> type;
+        private final IGuiIngredientGroup<T> group;
+
+        private IngredientGroupAccess(IIngredientType<T> type, IGuiIngredientGroup<T> group) {
+            this.type = type;
+            this.group = group;
+        }
     }
 
     private static final String[] RESOURCE_FILES = {
@@ -133,6 +170,7 @@ public class Dumper {
     private static final int RECIPE_PADDING = 8;
 
     private final IJeiRuntime runtime;
+    private final IIngredientRegistry ingredientRegistry;
     private final File outDir;
     private final ICommandSender sender;
     private final IconRenderer renderer = new IconRenderer();
@@ -140,15 +178,14 @@ public class Dumper {
     private final String dumpLocale = JeiDumpLocales.getCurrentLocaleCode();
     private final String generatedAt = Instant.now().toString();
 
-    /** Item icon dedup: stable key -> sanitised filename stem. */
-    private final Map<String, String> itemIds = new LinkedHashMap<>();
-    /** Item icon metadata (display name, mod, tooltip). Key matches {@link #itemIds}. */
-    private final Map<String, JsonObject> itemMeta = new LinkedHashMap<>();
-    /** Fluid icon dedup. */
-    private final Map<String, String> fluidIds = new LinkedHashMap<>();
-    private final Map<String, JsonObject> fluidMeta = new LinkedHashMap<>();
-    /** Inverted index: itemId -> list of {cat, idx, role} pointing at recipes that contain it. */
-    private final Map<String, JsonArray> itemRecipes = new LinkedHashMap<>();
+    /** Generic ingredient metadata keyed by globally unique id (<kind>:<helper unique id>). */
+    private final Map<String, JsonObject> ingredientMeta = new LinkedHashMap<>();
+    /** Inverted index: ingredient id -> list of {cat, idx, role, kind}. */
+    private final Map<String, JsonArray> ingredientRecipes = new LinkedHashMap<>();
+    /** Duplicate guard for the inverted index, so one recipe card is emitted once per ingredient/role. */
+    private final Map<String, Set<String>> ingredientRecipeKeys = new LinkedHashMap<>();
+    /** Cached JEI helper/renderer state for each ingredient type actually encountered. */
+    private final Map<IIngredientType<?>, IngredientTypeState<?>> ingredientTypes = new LinkedHashMap<>();
 
     // Cached reflective handle to mezz.jei.gui.ingredients.GuiIngredient#getRect().
     // The interface IGuiIngredient does not expose slot positions, but JEI's only concrete
@@ -158,18 +195,17 @@ public class Dumper {
     private static Method getRectMethod;
     private static boolean getRectResolved;
 
-    // Cached reflective handle to mezz.jei.gui.Focus(IFocus.Mode, V). Used as a fallback when
-    // a wrapper's setRecipe NPEs on a null focus (some mods register custom wrappers under
-    // vanilla categories that violate the @Nullable contract). JEI 4.x has no public focus
-    // factory; the internal Focus class is the only way.
+    // Cached reflective handle to mezz.jei.gui.recipes.RecipeLayout#guiIngredientGroups.
+    // Reading the populated map avoids creating empty ingredient groups for every registered type
+    // on every recipe; if the field layout changes, we fall back to the public API path.
     @Nullable
-    private static Constructor<?> focusCtor;
-    private static boolean focusCtorResolved;
+    private static Field recipeLayoutGroupsField;
+    private static boolean recipeLayoutGroupsResolved;
     @Nullable
     private static IFocus<ItemStack> fallbackFocus;
 
     // Phase state
-    private File dataDir, localesRoot, localeDataDir, catRoot, itemRoot, fluidRoot;
+    private File dataDir, localesRoot, localeDataDir, catRoot, ingredientRoot;
     @SuppressWarnings("rawtypes")
     private List<IRecipeCategory> categories;
     private int totalRecipes;
@@ -186,10 +222,15 @@ public class Dumper {
 
     private final Result result = new Result();
 
-    public Dumper(IJeiRuntime runtime, File outDir, ICommandSender sender) {
+    public Dumper(IJeiRuntime runtime, IIngredientRegistry ingredientRegistry, File outDir, ICommandSender sender) {
         this.runtime = runtime;
+        this.ingredientRegistry = ingredientRegistry;
         this.outDir = outDir;
         this.sender = sender;
+    }
+
+    public static Dumper create(IJeiRuntime runtime, IIngredientRegistry ingredientRegistry, File outDir, ICommandSender sender) {
+        return new Dumper(runtime, ingredientRegistry, outDir, sender);
     }
 
     public Result getResult() {
@@ -203,8 +244,7 @@ public class Dumper {
         localesRoot = new File(dataDir, "locales");
         localeDataDir = new File(localesRoot, dumpLocale);
         catRoot = new File(localeDataDir, "categories");
-        itemRoot = new File(localeDataDir, "items");
-        fluidRoot = new File(localeDataDir, "fluids");
+        ingredientRoot = new File(localeDataDir, "ingredients");
         if (!dataDir.mkdirs() && !dataDir.exists()) throw new IOException("Cannot create " + dataDir);
         if (!localesRoot.mkdirs() && !localesRoot.exists()) throw new IOException("Cannot create " + localesRoot);
         if (localeDataDir.exists()) {
@@ -212,8 +252,7 @@ public class Dumper {
         }
         if (!localeDataDir.mkdirs() && !localeDataDir.exists()) throw new IOException("Cannot create " + localeDataDir);
         catRoot.mkdirs();
-        itemRoot.mkdirs();
-        fluidRoot.mkdirs();
+        ingredientRoot.mkdirs();
         new File(outDir, "assets").mkdirs();
 
         IRecipeRegistry rr = runtime.getRecipeRegistry();
@@ -279,17 +318,12 @@ public class Dumper {
 
                     JsonArray inputs = new JsonArray();
                     JsonArray outputs = new JsonArray();
-                    JsonArray fluidInputs = new JsonArray();
-                    JsonArray fluidOutputs = new JsonArray();
                     JsonArray slots = new JsonArray();
 
-                    collectItemSlots(layout.getItemStacks(), currentCatId, wrapperIdx, inputs, outputs, slots);
-                    collectFluidSlots(layout.getFluidStacks(), currentCatId, wrapperIdx, fluidInputs, fluidOutputs, slots);
+                    collectIngredientSlots(layout, currentCatId, wrapperIdx, inputs, outputs, slots);
 
                     recObj.add("inputs", inputs);
                     recObj.add("outputs", outputs);
-                    recObj.add("fluidInputs", fluidInputs);
-                    recObj.add("fluidOutputs", fluidOutputs);
                     recObj.add("slots", slots);
                     currentRecipesJson.add(recObj);
                 }
@@ -301,6 +335,7 @@ public class Dumper {
             result.recipeCount++;
             processed++;
 
+            // TODO: Make that configurable? If we optimize speed enough, maybe we can afford to go faster and have more recipes between updates.
             // Roughly every 200 recipes, post a progress line. Tied to global count, not per-tick
             // budget, so the message density is independent of the tick budget knob.
             if (result.recipeCount % 200 == 0) {
@@ -325,11 +360,6 @@ public class Dumper {
         writeJson(root, new File(localeDataDir, "index.json"));
         writeLocaleDataScript(root, new File(localeDataDir, "index.js"), dumpLocale);
 
-        // Keep a root-level alias for the most recent dump so external tools and pre-locale sites
-        // can still open the folder without knowing about the locale manifest.
-        writeJson(root, new File(dataDir, "index.json"));
-        writeLegacyDataScript(root, new File(dataDir, "index.js"), dumpLocale);
-
         writeDataManifest();
         writeLangBundle();
 
@@ -340,7 +370,7 @@ public class Dumper {
             copyResource(src, dst);
         }
 
-        result.iconCount = itemIds.size() + fluidIds.size();
+        result.iconCount = ingredientMeta.size();
 
         long finalDumpBytes = measureTreeBytes(outDir.toPath());
         if (dedupSavedBytes > 0L) {
@@ -393,68 +423,66 @@ public class Dumper {
 
     // ----- ingredient collection -----
 
-    private void collectItemSlots(IGuiItemStackGroup group, String catId, int recipeIdx,
-                                  JsonArray inputs, JsonArray outputs, JsonArray slots) throws IOException {
-        for (IGuiIngredient<ItemStack> ig : group.getGuiIngredients().values()) {
-            ItemStack disp = ig.getDisplayedIngredient();
-            if (disp == null || disp.isEmpty()) {
-                disp = firstNonEmpty(ig.getAllIngredients());
-            }
-            if (disp == null || disp.isEmpty()) continue;
-
-            String id = idForItem(disp);
-            if (!itemIds.containsKey(id)) {
-                itemIds.put(id, id);
-                File png = new File(itemRoot, id + ".png");
-                try {
-                    renderer.renderItemIcon(disp, png);
-                } catch (Throwable t) {
-                    JeiDump.LOGGER.warn("Failed to render item icon for {}: {}", id, t.toString());
-                }
-                JsonObject meta = new JsonObject();
-                meta.addProperty("name", safeName(disp));
-                meta.addProperty("mod", modIdOf(disp));
-                meta.addProperty("img", localeDataPath("items/" + id + ".png"));
-                meta.add("tooltip", buildItemTooltip(disp));
-                itemMeta.put(id, meta);
-            }
-            (ig.isInput() ? inputs : outputs).add(new JsonPrimitive(id));
-            addInverted(id, catId, recipeIdx, ig.isInput() ? "in" : "out", "item");
-            addSlot(slots, ig, id, "item", RECIPE_PADDING);
+    private void collectIngredientSlots(IRecipeLayoutDrawable layout, String catId, int recipeIdx,
+                                        JsonArray inputs, JsonArray outputs, JsonArray slots) throws IOException {
+        for (IngredientGroupAccess<?> access : getIngredientGroups(layout)) {
+            collectIngredientGroupSlots(access, catId, recipeIdx, inputs, outputs, slots);
         }
     }
 
-    private void collectFluidSlots(IGuiFluidStackGroup group, String catId, int recipeIdx,
-                                   JsonArray inputs, JsonArray outputs, JsonArray slots) throws IOException {
-        for (IGuiIngredient<FluidStack> ig : group.getGuiIngredients().values()) {
-            FluidStack disp = ig.getDisplayedIngredient();
-            if (disp == null) {
-                List<FluidStack> all = ig.getAllIngredients();
-                if (all != null) {
-                    for (FluidStack f : all) { if (f != null) { disp = f; break; } }
-                }
-            }
-            if (disp == null || disp.getFluid() == null) continue;
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    private List<IngredientGroupAccess<?>> getIngredientGroups(IRecipeLayoutDrawable layout) {
+        List<IngredientGroupAccess<?>> groups = new ArrayList<>();
+        Map<IIngredientType<?>, IGuiIngredientGroup<?>> presentGroups = readIngredientGroups(layout);
+        if (presentGroups != null) {
+            for (Map.Entry<IIngredientType<?>, IGuiIngredientGroup<?>> entry : presentGroups.entrySet()) {
+                if (entry.getValue().getGuiIngredients().isEmpty()) continue;
 
-            String id = "fluid_" + sanitize(disp.getFluid().getName());
-            if (!fluidIds.containsKey(id)) {
-                fluidIds.put(id, id);
-                File png = new File(fluidRoot, id + ".png");
-                try {
-                    renderer.renderFluidIcon(disp, png);
-                } catch (Throwable t) {
-                    JeiDump.LOGGER.warn("Failed to render fluid icon for {}: {}", id, t.toString());
-                }
-                JsonObject meta = new JsonObject();
-                meta.addProperty("name", disp.getLocalizedName());
-                meta.addProperty("mod", modIdOf(disp));
-                meta.addProperty("img", localeDataPath("fluids/" + id + ".png"));
-                meta.add("tooltip", buildFluidTooltip(disp));
-                fluidMeta.put(id, meta);
+                groups.add(new IngredientGroupAccess(entry.getKey(), entry.getValue()));
             }
-            (ig.isInput() ? inputs : outputs).add(new JsonPrimitive(id));
-            addInverted(id, catId, recipeIdx, ig.isInput() ? "in" : "out", "fluid");
-            addSlot(slots, ig, id, "fluid", RECIPE_PADDING);
+
+            return groups;
+        }
+
+        for (IIngredientType type : ingredientRegistry.getRegisteredIngredientTypes()) {
+            IGuiIngredientGroup<?> group = layout.getIngredientsGroup(type);
+            if (group.getGuiIngredients().isEmpty()) continue;
+
+            groups.add(new IngredientGroupAccess(type, group));
+        }
+
+        return groups;
+    }
+
+    @SuppressWarnings("unchecked")
+    private void collectIngredientGroupSlots(IngredientGroupAccess<?> access, String catId, int recipeIdx,
+                                             JsonArray inputs, JsonArray outputs, JsonArray slots) throws IOException {
+        collectIngredientGroupSlotsTyped((IngredientGroupAccess<Object>) access, catId, recipeIdx, inputs, outputs, slots);
+    }
+
+    private <T> void collectIngredientGroupSlotsTyped(IngredientGroupAccess<T> access, String catId, int recipeIdx,
+                                                      JsonArray inputs, JsonArray outputs, JsonArray slots) throws IOException {
+        IngredientTypeState<T> state = stateForType(access.type);
+        for (IGuiIngredient<T> ingredient : access.group.getGuiIngredients().values()) {
+            T primary = firstRenderableIngredient(state, ingredient);
+            if (primary == null) continue;
+
+            String primaryId = registerIngredient(state, primary);
+            (ingredient.isInput() ? inputs : outputs).add(new JsonPrimitive(primaryId));
+            addSlot(slots, ingredient, primaryId, state.kind, RECIPE_PADDING);
+
+            Set<String> indexedIds = new LinkedHashSet<>();
+            indexedIds.add(primaryId);
+            for (T value : expandIngredients(state, ingredient.getAllIngredients())) {
+                if (!isRenderableIngredient(state, value)) continue;
+
+                indexedIds.add(registerIngredient(state, value));
+            }
+
+            String role = ingredient.isInput() ? "in" : "out";
+            for (String id : indexedIds) {
+                addInverted(id, catId, recipeIdx, role, state.kind);
+            }
         }
     }
 
@@ -472,40 +500,204 @@ public class Dumper {
         try {
             return rr.createRecipeLayoutDrawable((IRecipeCategory) cat, wrapper, null);
         } catch (NullPointerException npe) {
-            IFocus<ItemStack> focus = getFallbackFocus();
-            if (focus == null) throw npe; // can't recover, let the outer catch log it
+            IFocus<ItemStack> focus = getFallbackFocus(rr);
             return rr.createRecipeLayoutDrawable((IRecipeCategory) cat, wrapper, focus);
         }
     }
 
     /**
-     * Reflectively construct (and cache) a non-null {@link IFocus}. JEI 4.x doesn't expose any
-     * public way to build one, but the internal {@code mezz.jei.gui.Focus} ctor is stable across
-     * the 4.x line. Returns {@code null} if the class layout differs (e.g. a fork) so the caller
-     * can fall back to skipping the recipe.
+     * Build (and cache) a non-null {@link IFocus} using JEI's public recipe-registry API.
      */
-    @SuppressWarnings("unchecked")
-    @Nullable
-    private static IFocus<ItemStack> getFallbackFocus() {
+    private static IFocus<ItemStack> getFallbackFocus(IRecipeRegistry rr) {
         if (fallbackFocus != null) return fallbackFocus;
-        if (!focusCtorResolved) {
-            focusCtorResolved = true;
-            try {
-                Class<?> focusCls = Class.forName("mezz.jei.gui.Focus");
-                focusCtor = focusCls.getConstructor(IFocus.Mode.class, Object.class);
-            } catch (Throwable t) {
-                JeiDump.LOGGER.warn("Cannot resolve mezz.jei.gui.Focus, focus-NPE recipes will be skipped: {}", t.toString());
-            }
-        }
-        if (focusCtor == null) return null;
-        try {
-            // A stick is always present, never empty, and registered as an item ingredient type.
-            ItemStack placeholder = new ItemStack(Items.STICK);
-            fallbackFocus = (IFocus<ItemStack>) focusCtor.newInstance(IFocus.Mode.OUTPUT, placeholder);
-        } catch (Throwable t) {
-            JeiDump.LOGGER.warn("Cannot construct fallback focus: {}", t.toString());
-        }
+        ItemStack placeholder = new ItemStack(Items.STICK);
+        fallbackFocus = rr.createFocus(IFocus.Mode.OUTPUT, placeholder);
         return fallbackFocus;
+    }
+
+    @SuppressWarnings("unchecked")
+    private <T> IngredientTypeState<T> stateForType(IIngredientType<T> type) {
+        IngredientTypeState<?> cached = ingredientTypes.get(type);
+        if (cached != null) return (IngredientTypeState<T>) cached;
+
+        String kind = kindForType(type);
+        File rootDir = new File(ingredientRoot, kind);
+        IngredientTypeState<T> created = new IngredientTypeState<>(
+            type,
+            ingredientRegistry.getIngredientHelper(type),
+            ingredientRegistry.getIngredientRenderer(type),
+            kind,
+            labelKeyForType(type),
+            rootDir
+        );
+        ingredientTypes.put(type, created);
+        return created;
+    }
+
+    @Nullable
+    private static <T> T firstRenderableIngredient(IngredientTypeState<T> state, IGuiIngredient<T> ingredient) {
+        T displayed = ingredient.getDisplayedIngredient();
+        if (isRenderableIngredient(state, displayed)) return displayed;
+
+        return firstNonNull(expandIngredients(state, ingredient.getAllIngredients()));
+    }
+
+    private static <T> boolean isRenderableIngredient(IngredientTypeState<T> state, @Nullable T ingredient) {
+        if (ingredient == null) return false;
+        if (ingredient instanceof ItemStack && ((ItemStack) ingredient).isEmpty()) return false;
+
+        try {
+            return state.helper.isValidIngredient(ingredient);
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static <T> List<T> expandIngredients(IngredientTypeState<T> state, @Nullable List<T> ingredients) {
+        if (ingredients == null || ingredients.isEmpty()) return new ArrayList<>();
+
+        List<T> filtered = new ArrayList<>();
+        for (T ingredient : ingredients) {
+            if (!isRenderableIngredient(state, ingredient)) continue;
+
+            filtered.add(ingredient);
+        }
+        if (filtered.isEmpty()) return filtered;
+
+        List<T> expanded = state.helper.expandSubtypes(filtered);
+        if (expanded == null || expanded.isEmpty()) return filtered;
+
+        List<T> result = new ArrayList<>();
+        for (T ingredient : expanded) {
+            if (!isRenderableIngredient(state, ingredient)) continue;
+
+            result.add(ingredient);
+        }
+
+        return result.isEmpty() ? filtered : result;
+    }
+
+    private <T> String registerIngredient(IngredientTypeState<T> state, T ingredient) throws IOException {
+        String id = state.kind + ":" + safeUniqueId(state, ingredient);
+        if (ingredientMeta.containsKey(id)) return id;
+
+        if (!state.rootDir.mkdirs() && !state.rootDir.exists()) {
+            throw new IOException("Cannot create " + state.rootDir);
+        }
+
+        String fileStem = fileStemFor(id);
+        renderer.renderIngredientIcon(state.renderer, ingredient, new File(state.rootDir, fileStem + ".png"));
+
+        JsonObject meta = new JsonObject();
+        meta.addProperty("name", safeDisplayName(state, ingredient));
+        meta.addProperty("mod", safeModId(state, ingredient));
+        meta.addProperty("img", localeDataPath("ingredients/" + state.kind + "/" + fileStem + ".png"));
+        meta.addProperty("kind", state.kind);
+        meta.add("tooltip", buildIngredientTooltip(state, ingredient));
+        ingredientMeta.put(id, meta);
+        state.uniqueCount++;
+        return id;
+    }
+
+    private static <T> String safeUniqueId(IngredientTypeState<T> state, T ingredient) {
+        try {
+            return state.helper.getUniqueId(ingredient);
+        } catch (Throwable t) {
+            JeiDump.LOGGER.warn("Falling back to hashed JEI ingredient id for kind {}: {}", state.kind, t.toString());
+            return sanitize(String.valueOf(ingredient)) + "_" + Integer.toHexString(String.valueOf(ingredient).hashCode());
+        }
+    }
+
+    private static <T> String safeDisplayName(IngredientTypeState<T> state, T ingredient) {
+        try {
+            return state.helper.getDisplayName(ingredient);
+        } catch (Throwable t) {
+            return String.valueOf(ingredient);
+        }
+    }
+
+    private static <T> String safeModId(IngredientTypeState<T> state, T ingredient) {
+        try {
+            return state.helper.getDisplayModId(ingredient);
+        } catch (Throwable t) {
+            return "unknown";
+        }
+    }
+
+    private static <T> JsonArray buildIngredientTooltip(IngredientTypeState<T> state, T ingredient) {
+        JsonArray tooltip = new JsonArray();
+        try {
+            List<String> lines = state.renderer.getTooltip(Minecraft.getMinecraft(), ingredient, ITooltipFlag.TooltipFlags.NORMAL);
+            if (lines != null) {
+                for (String line : lines) {
+                    tooltip.add(new JsonPrimitive(stripFormatting(line)));
+                }
+            }
+        } catch (Throwable t) {
+            // Fall back to the helper's display name only.
+        }
+
+        if (tooltip.size() == 0) {
+            tooltip.add(new JsonPrimitive(safeDisplayName(state, ingredient)));
+        }
+
+        return tooltip;
+    }
+
+    private static String stripFormatting(@Nullable String line) {
+        if (line == null) return "";
+
+        String stripped = TextFormatting.getTextWithoutFormattingCodes(line);
+        return stripped == null ? line : stripped;
+    }
+
+    private void addInverted(String id, String catId, int recipeIdx, String role, String kind) {
+        String refKey = catId + '\n' + recipeIdx + '\n' + role;
+        Set<String> seenKeys = ingredientRecipeKeys.get(id);
+        if (seenKeys == null) {
+            seenKeys = new LinkedHashSet<>();
+            ingredientRecipeKeys.put(id, seenKeys);
+        }
+        if (!seenKeys.add(refKey)) return;
+
+        JsonArray refs = ingredientRecipes.get(id);
+        if (refs == null) {
+            refs = new JsonArray();
+            ingredientRecipes.put(id, refs);
+        }
+        JsonObject ref = new JsonObject();
+        ref.addProperty("cat", catId);
+        ref.addProperty("idx", recipeIdx);
+        ref.addProperty("role", role);
+        ref.addProperty("kind", kind);
+        refs.add(ref);
+    }
+
+    private static String fileStemFor(String id) {
+        String sanitized = sanitize(id);
+        if (sanitized.length() > 80) sanitized = sanitized.substring(0, 80);
+
+        return sanitized + "_" + Integer.toHexString(id.hashCode());
+    }
+
+    private static String kindForType(IIngredientType<?> type) {
+        if (type == VanillaTypes.ITEM) return "item";
+        if (type == VanillaTypes.FLUID) return "fluid";
+
+        return sanitize(type.getIngredientClass().getName()).toLowerCase(Locale.ROOT);
+    }
+
+    private static String labelKeyForType(IIngredientType<?> type) {
+        if (type == VanillaTypes.ITEM) return "jeidump.web.search.type.item";
+        if (type == VanillaTypes.FLUID) return "jeidump.web.search.type.fluid";
+
+        // TODO: Find some way to query the ingredient type name.
+        //       It should exist in lang files, but the hard part is getting the translation key without hardcoding it per-type.
+
+        // JEI exposes no generic localized ingredient-type label for custom ingredient classes.
+        // Use the localized generic "ingredient" label instead of leaking English class names
+        // into every translated UI.
+        return "jeidump.web.search.type.ingredient";
     }
 
     /**
@@ -526,6 +718,37 @@ public class Dumper {
         slot.addProperty("kind", kind);
         slot.addProperty("role", ig.isInput() ? "in" : "out");
         slots.add(slot);
+    }
+
+    @Nullable
+    private static Map<IIngredientType<?>, IGuiIngredientGroup<?>> readIngredientGroups(IRecipeLayoutDrawable layout) {
+        if (!recipeLayoutGroupsResolved) {
+            recipeLayoutGroupsResolved = true;
+            try {
+                recipeLayoutGroupsField = Class.forName("mezz.jei.gui.recipes.RecipeLayout").getDeclaredField("guiIngredientGroups");
+                recipeLayoutGroupsField.setAccessible(true);
+            } catch (Throwable t) {
+                JeiDump.LOGGER.warn("Cannot resolve RecipeLayout#guiIngredientGroups, falling back to registered-type scan: {}", t.toString());
+            }
+        }
+        if (recipeLayoutGroupsField == null) return null;
+
+        try {
+            if (!recipeLayoutGroupsField.getDeclaringClass().isInstance(layout)) return null;
+
+            Object value = recipeLayoutGroupsField.get(layout);
+            if (!(value instanceof Map)) return null;
+
+            Map<IIngredientType<?>, IGuiIngredientGroup<?>> groups = new LinkedHashMap<>();
+            for (Map.Entry<?, ?> entry : ((Map<?, ?>) value).entrySet()) {
+                if (!(entry.getKey() instanceof IIngredientType) || !(entry.getValue() instanceof IGuiIngredientGroup)) continue;
+
+                groups.put((IIngredientType<?>) entry.getKey(), (IGuiIngredientGroup<?>) entry.getValue());
+            }
+            return groups;
+        } catch (Throwable t) {
+            return null;
+        }
     }
 
     /**
@@ -555,88 +778,11 @@ public class Dumper {
         }
     }
 
-    /** Capture the vanilla NORMAL-flag tooltip; strip color codes for plain HTML rendering. */
-    private static JsonArray buildItemTooltip(ItemStack stack) {
-        JsonArray arr = new JsonArray();
-        try {
-            EntityPlayer player = Minecraft.getMinecraft().player;
-            // Some vanilla / modded tooltip code crashes when player is null at the main menu.
-            // The command runs in-world so player should be non-null, but guard anyway.
-            List<String> lines = stack.getTooltip(player, ITooltipFlag.TooltipFlags.NORMAL);
-            for (String line : lines) {
-                arr.add(new JsonPrimitive(TextFormatting.getTextWithoutFormattingCodes(line)));
-            }
-        } catch (Throwable t) {
-            // Fall back to display name only.
-            arr.add(new JsonPrimitive(safeName(stack)));
-        }
-        return arr;
-    }
-
-    private static JsonArray buildFluidTooltip(FluidStack stack) {
-        JsonArray arr = new JsonArray();
-        arr.add(new JsonPrimitive(stack.getLocalizedName()));
-        arr.add(new JsonPrimitive(stack.amount + " mB"));
-        return arr;
-    }
-
-    private void addInverted(String id, String catId, int recipeIdx, String role, String kind) {
-        JsonArray arr = itemRecipes.get(id);
-        if (arr == null) {
-            arr = new JsonArray();
-            itemRecipes.put(id, arr);
-        }
-        JsonObject ref = new JsonObject();
-        ref.addProperty("cat", catId);
-        ref.addProperty("idx", recipeIdx);
-        ref.addProperty("role", role);
-        ref.addProperty("kind", kind);
-        arr.add(ref);
-    }
-
-    /**
-     * Build a stable, filesystem-safe identifier for an item: domain_path_meta_nbthash.
-     * NBT presence is hashed instead of serialised so we don't blow up the filename for items with
-     * complex tags (enchanted books, written books, etc.).
-     */
-    private static String idForItem(ItemStack stack) {
-        ResourceLocation rn = stack.getItem().getRegistryName();
-        String base = rn == null ? "unknown_unknown" : (rn.getNamespace() + "_" + rn.getPath());
-        int meta = stack.getMetadata();
-        String nbtPart = "";
-        if (stack.hasTagCompound() && stack.getTagCompound() != null) {
-            nbtPart = "_" + Integer.toHexString(stack.getTagCompound().hashCode());
-        }
-        return sanitize(base + "_" + meta + nbtPart);
-    }
-
-    private static String modIdOf(ItemStack stack) {
-        ResourceLocation rn = stack.getItem().getRegistryName();
-        return rn == null ? "minecraft" : rn.getNamespace();
-    }
-
-    private static String modIdOf(FluidStack fluid) {
-        // FluidStack doesn't carry a registry name; best effort via the still texture's domain.
-        if (fluid.getFluid() == null) return "minecraft";
-        ResourceLocation tex = fluid.getFluid().getStill();
-        return tex == null ? "minecraft" : tex.getNamespace();
-    }
-
-    private static String safeName(ItemStack stack) {
-        try {
-            return stack.getDisplayName();
-        } catch (Throwable t) {
-            // Some buggy items throw during getDisplayName when their NBT is malformed.
-            ResourceLocation rn = stack.getItem().getRegistryName();
-            return rn == null ? "unknown" : rn.toString();
-        }
-    }
-
     @Nullable
-    private static ItemStack firstNonEmpty(@Nullable List<ItemStack> list) {
-        if (list == null) return null;
-        for (ItemStack s : list) {
-            if (s != null && !s.isEmpty()) return s;
+    private static <T> T firstNonNull(@Nullable Collection<T> values) {
+        if (values == null) return null;
+        for (T value : values) {
+            if (value != null) return value;
         }
         return null;
     }
@@ -656,23 +802,29 @@ public class Dumper {
         root.addProperty("generatedAt", generatedAt);
         root.add("categories", categoriesJson);
 
-        JsonObject itemsRoot = new JsonObject();
-        for (Map.Entry<String, JsonObject> e : itemMeta.entrySet()) {
-            itemsRoot.add(e.getKey(), e.getValue());
-        }
-        root.add("items", itemsRoot);
+        JsonObject ingredientKindsRoot = new JsonObject();
+        for (IngredientTypeState<?> state : ingredientTypes.values()) {
+            if (state.uniqueCount == 0) continue;
 
-        JsonObject fluidsRoot = new JsonObject();
-        for (Map.Entry<String, JsonObject> e : fluidMeta.entrySet()) {
-            fluidsRoot.add(e.getKey(), e.getValue());
+            JsonObject kind = new JsonObject();
+            kind.addProperty("translationKey", state.labelKey);
+            kind.addProperty("className", state.type.getIngredientClass().getName());
+            kind.addProperty("count", state.uniqueCount);
+            ingredientKindsRoot.add(state.kind, kind);
         }
-        root.add("fluids", fluidsRoot);
+        root.add("ingredientKinds", ingredientKindsRoot);
 
-        JsonObject itemRecipesRoot = new JsonObject();
-        for (Map.Entry<String, JsonArray> e : itemRecipes.entrySet()) {
-            itemRecipesRoot.add(e.getKey(), e.getValue());
+        JsonObject ingredientsRoot = new JsonObject();
+        for (Map.Entry<String, JsonObject> e : ingredientMeta.entrySet()) {
+            ingredientsRoot.add(e.getKey(), e.getValue());
         }
-        root.add("itemRecipes", itemRecipesRoot);
+        root.add("ingredients", ingredientsRoot);
+
+        JsonObject ingredientRecipesRoot = new JsonObject();
+        for (Map.Entry<String, JsonArray> e : ingredientRecipes.entrySet()) {
+            ingredientRecipesRoot.add(e.getKey(), e.getValue());
+        }
+        root.add("ingredientRecipes", ingredientRecipesRoot);
         return root;
     }
 
@@ -782,16 +934,6 @@ public class Dumper {
     private void writeJson(JsonObject root, File dst) throws IOException {
         try (BufferedWriter bw = Files.newBufferedWriter(dst.toPath(), StandardCharsets.UTF_8)) {
             gson.toJson(root, bw);
-        }
-    }
-
-    private void writeLegacyDataScript(JsonObject root, File dst, String locale) throws IOException {
-        try (BufferedWriter bw = Files.newBufferedWriter(dst.toPath(), StandardCharsets.UTF_8)) {
-            bw.write("window.__JEI_DUMP_DATA = ");
-            gson.toJson(root, bw);
-            bw.write(";\nwindow.__JEI_DUMP_DATA_LOCALE = ");
-            gson.toJson(locale, bw);
-            bw.write(";\n");
         }
     }
 

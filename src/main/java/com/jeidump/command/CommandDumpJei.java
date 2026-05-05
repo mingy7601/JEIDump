@@ -19,6 +19,7 @@ import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
 import net.minecraftforge.fml.common.gameevent.TickEvent;
 
 import mezz.jei.api.IJeiRuntime;
+import mezz.jei.api.ingredients.IIngredientRegistry;
 
 import com.jeidump.JeiDump;
 import com.jeidump.config.JeiDumpConfig;
@@ -70,7 +71,8 @@ public class CommandDumpJei extends CommandBase {
         }
 
         IJeiRuntime runtime = JeiDumpPlugin.getRuntime();
-        if (runtime == null) {
+        IIngredientRegistry ingredientRegistry = JeiDumpPlugin.getIngredientRegistry();
+        if (runtime == null || ingredientRegistry == null) {
             sender.sendMessage(new TextComponentTranslation("jeidump.command.no_runtime"));
             return;
         }
@@ -93,7 +95,7 @@ public class CommandDumpJei extends CommandBase {
         sender.sendMessage(new TextComponentTranslation("jeidump.command.start", outDir.getAbsolutePath()));
         info(sender, "jeidump.command.budget", budget);
 
-        Dumper job = new Dumper(runtime, outDir, sender);
+        Dumper job = Dumper.create(runtime, ingredientRegistry, outDir, sender);
         try {
             job.setup();
         } catch (Throwable t) {

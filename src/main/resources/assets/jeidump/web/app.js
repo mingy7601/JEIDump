@@ -1,11 +1,11 @@
 /* JEI Dump frontend.
  *
- * Loads data/index.json once, builds:
+ * Loads locale-specific dump data on demand and builds:
  *   - a sidebar with a clickable list of every category,
  *   - a main pane that shows a paginated grid of recipe images for the active category,
  *   - an "ingredient focus" view (URL #ing=<id>&mode=for|use) that aggregates every recipe
  *     from every category that produces (mode=for) or consumes (mode=use) the given ingredient,
- *   - a top-bar fuzzy search that indexes items, fluids, mods and category titles.
+ *   - a top-bar fuzzy search that indexes JEI ingredients, mods and category titles.
  *
  * Recipe images are rendered server-side at IconRenderer.RECIPE_SCALE x logical size, and the
  * `scale` field on each recipe carries that multiplier. Categories may also expose a shared
@@ -31,7 +31,7 @@
 
     const FALLBACK_TRANSLATIONS = {
         'jeidump.web.title': 'JEI Dump',
-        'jeidump.web.search.placeholder': 'Search items, fluids, mods, categories...',
+        'jeidump.web.search.placeholder': 'Search ingredients, mods, categories...',
         'jeidump.web.lang.label': 'Language',
         'jeidump.web.sidebar.categories': 'Categories',
         'jeidump.web.loading.title': 'Loading...',
@@ -57,6 +57,7 @@
         'jeidump.web.ingredient.empty.for': 'No recipe produces this ingredient in the dump.',
         'jeidump.web.ingredient.empty.use': 'No recipe consumes this ingredient in the dump.',
         'jeidump.web.search.no_matches': 'No matches',
+        'jeidump.web.search.type.ingredient': 'ingredient',
         'jeidump.web.search.type.category': 'category',
         'jeidump.web.search.type.item': 'item',
         'jeidump.web.search.type.fluid': 'fluid',
@@ -65,6 +66,8 @@
         'jeidump.web.count.category.many': '%d categories',
         'jeidump.web.count.recipe.one': '%d recipe',
         'jeidump.web.count.recipe.many': '%d recipes',
+        'jeidump.web.count.ingredient.one': '%d ingredient',
+        'jeidump.web.count.ingredient.many': '%d ingredients',
         'jeidump.web.count.item.one': '%d item',
         'jeidump.web.count.item.many': '%d items',
         'jeidump.web.count.fluid.one': '%d fluid',
@@ -77,15 +80,12 @@
     };
     const MANIFEST = window.__JEI_DUMP_MANIFEST || {
         availableDataLocales: [],
-        latestDumpLocale: window.__JEI_DUMP_DATA_LOCALE || null
+        latestDumpLocale: null
     };
 
     const DATA_CACHE = new Map();
     const SCRIPT_CACHE = new Map();
 
-    if (window.__JEI_DUMP_DATA && window.__JEI_DUMP_DATA_LOCALE) {
-        DATA_CACHE.set(normalizeLocaleCode(window.__JEI_DUMP_DATA_LOCALE), window.__JEI_DUMP_DATA);
-    }
     if (window.__JEI_DUMP_DATASETS) {
         for (const locale in window.__JEI_DUMP_DATASETS) {
             DATA_CACHE.set(normalizeLocaleCode(locale), window.__JEI_DUMP_DATASETS[locale]);
@@ -268,26 +268,15 @@
             });
         }
 
-        for (const id in DATA.items) {
-            const item = DATA.items[id];
+        for (const id in DATA.ingredients) {
+            const ingredient = DATA.ingredients[id];
             SEARCH.push({
-                key: (item.name + ' ' + item.mod + ' ' + id).toLowerCase(),
-                label: item.name,
-                mod: item.mod,
-                img: item.img,
-                type: 'item',
-                target: { ingredient: id }
-            });
-        }
-
-        for (const id in DATA.fluids) {
-            const fluid = DATA.fluids[id];
-            SEARCH.push({
-                key: (fluid.name + ' ' + fluid.mod + ' ' + id).toLowerCase(),
-                label: fluid.name,
-                mod: fluid.mod,
-                img: fluid.img,
-                type: 'fluid',
+                key: (ingredient.name + ' ' + ingredient.mod + ' ' + kindLabelFor(ingredient.kind) + ' ' + id).toLowerCase(),
+                label: ingredient.name,
+                mod: ingredient.mod,
+                img: ingredient.img,
+                type: 'ingredient',
+                kind: ingredient.kind,
                 target: { ingredient: id }
             });
         }
@@ -340,8 +329,7 @@
         welcome.appendChild(node('p', 'subtitle', joinSummary([
             countLabel('category', DATA.categories.length),
             countLabel('recipe', totalRecipeCount()),
-            countLabel('item', Object.keys(DATA.items).length),
-            countLabel('fluid', Object.keys(DATA.fluids).length)
+            countLabel('ingredient', Object.keys(DATA.ingredients).length)
         ])));
 
         const grid = node('div', 'index-grid');
@@ -361,8 +349,8 @@
     function recipeCardNode(recipe, idx, backgroundImg) {
         const card = node('div', 'recipe-card');
         card.tabIndex = 0;
-        card.dataset.firstIn = (recipe.inputs && recipe.inputs[0]) || (recipe.fluidInputs && recipe.fluidInputs[0]) || '';
-        card.dataset.firstOut = (recipe.outputs && recipe.outputs[0]) || (recipe.fluidOutputs && recipe.fluidOutputs[0]) || '';
+        card.dataset.firstIn = (recipe.inputs && recipe.inputs[0]) || '';
+        card.dataset.firstOut = (recipe.outputs && recipe.outputs[0]) || '';
 
         const wrap = node('div', 'recipe-img-wrap');
         const width = recipe.w * DISPLAY_ZOOM;
@@ -514,22 +502,25 @@
         activeCatId = null;
         clearSidebarSelection();
 
-        const meta = DATA.items[id] || DATA.fluids[id];
+        const meta = DATA.ingredients[id];
         const wantRole = mode === 'use' ? 'in' : 'out';
-        const refs = (DATA.itemRecipes[id] || []).filter(ref => ref.role === wantRole);
+        const refs = (DATA.ingredientRecipes[id] || []).filter(ref => ref.role === wantRole);
         const byCat = new Map();
 
         for (const ref of refs) {
-            if (!byCat.has(ref.cat)) byCat.set(ref.cat, []);
-            byCat.get(ref.cat).push(ref.idx);
+            if (!byCat.has(ref.cat)) byCat.set(ref.cat, new Set());
+            byCat.get(ref.cat).add(ref.idx);
         }
+
+        let recipeCount = 0;
+        byCat.forEach(indices => { recipeCount += indices.size; });
 
         const content = byId('content');
         content.replaceChildren();
         content.appendChild(buildIngredientHeading(meta, id, mode));
-        content.appendChild(buildIngredientSubtitle(meta, id, mode, refs.length, byCat.size));
+        content.appendChild(buildIngredientSubtitle(meta, id, mode, recipeCount, byCat.size));
 
-        if (refs.length === 0) {
+        if (recipeCount === 0) {
             const key = mode === 'use' ? 'jeidump.web.ingredient.empty.use' : 'jeidump.web.ingredient.empty.for';
             content.appendChild(node('p', null, t(key)));
             return;
@@ -542,10 +533,11 @@
             if (!indices) continue;
 
             const section = node('div', 'ing-section');
-            section.appendChild(buildIngredientSectionHeading(cat, indices.length));
+            const recipeIndices = Array.from(indices).sort((left, right) => left - right);
+            section.appendChild(buildIngredientSectionHeading(cat, recipeIndices.length));
 
             const grid = node('div', 'recipe-grid');
-            for (const recipeIndex of indices) {
+            for (const recipeIndex of recipeIndices) {
                 const recipe = cat.recipes[recipeIndex];
                 if (!recipe) continue;
                 grid.appendChild(recipeCardNode(recipe, recipeIndex, cat.backgroundImg));
@@ -576,12 +568,13 @@
     function buildIngredientSubtitle(meta, id, mode, recipeCount, categoryCount) {
         const subtitle = node('p', 'subtitle');
         const modName = meta ? (meta.mod || t('jeidump.web.unknown_mod')) : t('jeidump.web.unknown_mod');
+        const typeLabel = meta ? kindLabelFor(meta.kind) : searchTypeLabel('ingredient');
         const linkKey = mode === 'use' ? 'jeidump.web.ingredient.show.for' : 'jeidump.web.ingredient.show.use';
         const linkMode = mode === 'use' ? 'for' : 'use';
         const link = node('a', null, t('jeidump.web.action.show', t(linkKey)));
         link.href = '#ing=' + encodeURIComponent(id) + '&mode=' + linkMode;
 
-        subtitle.appendChild(document.createTextNode(modName + ' | '));
+        subtitle.appendChild(document.createTextNode(modName + ' | ' + typeLabel + ' | '));
         subtitle.appendChild(node('code', null, id));
         subtitle.appendChild(document.createTextNode(' | ' + countLabel('recipe', recipeCount) + ' | ' + countLabel('category', categoryCount) + ' | '));
         subtitle.appendChild(link);
@@ -708,7 +701,7 @@
         }
 
         row.appendChild(node('span', null, hit.entry.label));
-        row.appendChild(node('span', 'meta', searchTypeLabel(hit.entry.type) + ' | ' + (hit.entry.mod || t('jeidump.web.unknown_mod'))));
+        row.appendChild(node('span', 'meta', searchTypeLabel(hit.entry.type === 'ingredient' ? hit.entry.kind : hit.entry.type) + ' | ' + (hit.entry.mod || t('jeidump.web.unknown_mod'))));
         return row;
     }
 
@@ -837,7 +830,7 @@
 
     function showTooltip(tip, spot) {
         const id = spot.dataset.id;
-        const meta = DATA.items[id] || DATA.fluids[id];
+        const meta = DATA.ingredients[id];
         if (!meta) {
             tip.hidden = true;
             return;
@@ -998,7 +991,18 @@
     }
 
     function searchTypeLabel(kind) {
-        return t('jeidump.web.search.type.' + kind);
+        return kindLabelFor(kind);
+    }
+
+    function kindLabelFor(kind) {
+        const normalized = kind || 'ingredient';
+        const kindInfo = DATA && DATA.ingredientKinds && DATA.ingredientKinds[normalized];
+        if (kindInfo && kindInfo.translationKey) return t(kindInfo.translationKey);
+
+        const translated = t('jeidump.web.search.type.' + normalized);
+        if (translated !== 'jeidump.web.search.type.' + normalized) return translated;
+
+        return t('jeidump.web.search.type.ingredient');
     }
 
     function totalRecipeCount() {
