@@ -234,22 +234,18 @@ code {
 /* Recipe grid */
 .recipe-grid {
     display: grid;
-    /* Cards size to fit their image's natural display width (the dumper renders recipes at
-       a higher resolution, then app.js displays them at an integer multiple of the *logical*
-       canvas size). 240px is wide enough for the typical 128x64 vanilla recipe at 2x zoom
-       plus padding; oversized recipes spill into a wider track via auto-fill. */
-    grid-template-columns: repeat(auto-fill, minmax(240px, max-content));
     justify-content: start;
     gap: 14px;
 }
 .recipe-card {
+     box-sizing: border-box;
     padding: 8px;
     background: #fff;
     text-align: center;
     transition: box-shadow 0.12s ease;
-    /* Fit the displayed image; never stretch. The wrap below sets explicit pixel width/height
-       to lock the image at an integer multiple of its logical size. */
-    width: max-content;
+     /* app.js injects the measured outer width for the current grid so every card keeps the
+         same footprint as the recipe image it wraps. */
+     width: var(--recipe-card-width, max-content);
 }
 .recipe-card img {
     image-rendering: pixelated;

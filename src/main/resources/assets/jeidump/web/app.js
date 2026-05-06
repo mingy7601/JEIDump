@@ -28,6 +28,10 @@
     const DISPLAY_ZOOM = 2;
     const DEFAULT_UI_LOCALE = 'en_us';
     const DEFAULT_DATA_LOCALE = 'en_us';
+    const RECIPE_GRID_GAP = 14;
+    const RECIPE_CARD_HORIZONTAL_PADDING = 16;
+    const RECIPE_TARGET_COLUMN_WIDTH = 340;
+    const RECIPE_MAX_COLUMNS = 6;
 
     const FALLBACK_TRANSLATIONS = {
         'jeidump.web.title': 'JEI Dump',
@@ -112,6 +116,7 @@
         wireLocaleSelect();
         wireSearch();
         window.addEventListener('hashchange', applyHash);
+        window.addEventListener('resize', layoutVisibleRecipeGrids);
         loadDataForUiLocale(uiLocale);
     }
 
@@ -407,6 +412,63 @@
         return image;
     }
 
+    /*
+     * Every recipe card in a category *should* share the same logical canvas size, so a single
+     * sample recipe is enough to size the whole grid. We keep the column width tied to that
+     * real card width, then cap ultra-wide layouts so narrow recipes do not collapse into a
+     * wall of tiny cards on large monitors.
+     */
+    function configureRecipeGrid(grid, recipes) {
+        const sample = firstSizedRecipe(recipes);
+        if (!sample) {
+            delete grid.dataset.cardWidth;
+            grid.style.removeProperty('--recipe-card-width');
+            grid.style.removeProperty('grid-template-columns');
+            return;
+        }
+
+        const cardWidth = sample.w * DISPLAY_ZOOM + RECIPE_CARD_HORIZONTAL_PADDING;
+        grid.dataset.cardWidth = String(cardWidth);
+        grid.style.setProperty('--recipe-card-width', cardWidth + 'px');
+        layoutRecipeGrid(grid);
+    }
+
+    function layoutVisibleRecipeGrids() {
+        document.querySelectorAll('.recipe-grid[data-card-width]').forEach(layoutRecipeGrid);
+    }
+
+    function layoutRecipeGrid(grid) {
+        const cardWidth = Number(grid.dataset.cardWidth);
+        if (!cardWidth) return;
+
+        const container = grid.parentElement || byId('content');
+        const availableWidth = Math.max(
+            cardWidth,
+            container ? container.clientWidth : (grid.clientWidth || cardWidth)
+        );
+        const naturalColumns = Math.max(
+            1,
+            Math.floor((availableWidth + RECIPE_GRID_GAP) / (cardWidth + RECIPE_GRID_GAP))
+        );
+        const comfortableColumns = Math.max(
+            1,
+            Math.min(RECIPE_MAX_COLUMNS, Math.ceil(availableWidth / RECIPE_TARGET_COLUMN_WIDTH))
+        );
+        const columnCount = Math.max(1, Math.min(naturalColumns, comfortableColumns));
+
+        grid.style.gridTemplateColumns = 'repeat(' + columnCount + ', ' + cardWidth + 'px)';
+    }
+
+    function firstSizedRecipe(recipes) {
+        for (const recipe of recipes) {
+            if (!recipe) continue;
+            if (!Number.isFinite(recipe.w) || recipe.w <= 0) continue;
+            return recipe;
+        }
+
+        return null;
+    }
+
     function renderCategory(catId, page) {
         const cat = DATA.categories.find(entry => entry.id === catId);
         if (!cat) {
@@ -444,6 +506,7 @@
             grid.appendChild(recipeCardNode(slice[i], activePage * PAGE_SIZE + i, cat.backgroundImg));
         }
         content.appendChild(grid);
+        configureRecipeGrid(grid, slice);
 
         if (totalPages > 1) {
             content.appendChild(buildPager(catId, activePage, totalPages));
@@ -541,17 +604,20 @@
 
             const section = node('div', 'ing-section');
             const recipeIndices = Array.from(indices).sort((left, right) => left - right);
+            const sectionRecipes = [];
             section.appendChild(buildIngredientSectionHeading(cat, recipeIndices.length));
 
             const grid = node('div', 'recipe-grid');
             for (const recipeIndex of recipeIndices) {
                 const recipe = cat.recipes[recipeIndex];
                 if (!recipe) continue;
+                sectionRecipes.push(recipe);
                 grid.appendChild(recipeCardNode(recipe, recipeIndex, cat.backgroundImg));
             }
 
             section.appendChild(grid);
             content.appendChild(section);
+            configureRecipeGrid(grid, sectionRecipes);
         }
 
         wireHotspots(content);

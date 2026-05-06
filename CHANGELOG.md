@@ -13,6 +13,9 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 - Expose Botania mana costs and Thermal Expansion RF bars through reusable virtual ingredient types, with one shared ingredient id per resource type, recipe-specific tooltip text staying on the exported hotspot, and correct produce-vs-consume indexing for the exported ingredient pages. Any integration can expose arbitrary virtual ingredients via integration/, which the frontend will handle generically.
 - Allow tooltip query zones to be defined from JSON files under `config/jeidump/integrations/<modid>/`, so non-slot JEI hints can be configured for any loaded mod without adding new Java integrations.
 
+### Fixed
+- Make recipe grids size columns from each category's actual image width, which prevents wide recipe cards from bleeding into adjacent columns while keeping ultra-wide screens from over-packing narrow recipes.
+
 
 ## [1.1.0] - 2025-05-05
 ### Added
