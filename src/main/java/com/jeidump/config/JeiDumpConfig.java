@@ -30,6 +30,7 @@ public class JeiDumpConfig {
     public static final String CATEGORY_GENERAL = "general";
 
     private static Configuration config;
+    private static File configDir;
 
     /**
      * Default number of recipes processed per client tick during a dump.
@@ -63,9 +64,17 @@ public class JeiDumpConfig {
      */
     public static void init(File configFile) {
         if (config == null) {
+            configDir = configFile.getParentFile();
             config = new Configuration(configFile);
             loadConfig();
         }
+    }
+
+    /**
+     * Gets the Forge config directory containing the JEI Dump config file.
+     */
+    public static File getConfigDir() {
+        return configDir;
     }
 
     /**

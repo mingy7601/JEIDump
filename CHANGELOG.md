@@ -8,6 +8,12 @@ The format is based on Keep a Changelog and this project adheres to Semantic Ver
 - Semantic Versioning: https://semver.org/spec/v2.0.0.html
 
 
+## [1.2.0] - 2025-05-06
+### Added
+- Expose Botania mana costs and Thermal Expansion RF bars through reusable virtual ingredient types, with one shared ingredient id per resource type, recipe-specific tooltip text staying on the exported hotspot, and correct produce-vs-consume indexing for the exported ingredient pages. Any integration can expose arbitrary virtual ingredients via integration/, which the frontend will handle generically.
+- Allow tooltip query zones to be defined from JSON files under `config/jeidump/integrations/<modid>/`, so non-slot JEI hints can be configured for any loaded mod without adding new Java integrations.
+
+
 ## [1.1.0] - 2025-05-05
 ### Added
 - Add a "last updated" timestamp to the footer, showing when the dump was generated.

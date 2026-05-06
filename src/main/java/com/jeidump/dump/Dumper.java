@@ -59,6 +59,8 @@ import mezz.jei.api.recipe.IRecipeWrapper;
 import com.jeidump.JeiDump;
 import com.jeidump.command.CommandDumpJei;
 import com.jeidump.config.JeiDumpConfig;
+import com.jeidump.integration.DumpIntegrations;
+import com.jeidump.integration.RecipeDumpIntegration;
 import com.jeidump.i18n.JeiDumpLocales;
 
 
@@ -92,9 +94,10 @@ import com.jeidump.i18n.JeiDumpLocales;
  *       also exposes {@code backgroundImg}.</li>
  *   <li>{@code slots}: array of {@code {x,y,w,h,id,kind,role}} so the frontend can overlay
  *       hotspots that exactly match JEI's layout for hover/tooltip + click navigation. Slots may
- *       also carry {@code tooltip}/{@code tooltipHtml} overrides when the live JEI tooltip for
- *       that stack differs from the shared ingredient metadata, for example fluids with
- *       different amounts.</li>
+ *       point at real JEI ingredients or synthetic recipe details such as Botania mana costs.
+ *       Slots may also carry {@code tooltip}/{@code tooltipHtml} overrides when the live JEI
+ *       tooltip for that stack differs from the shared ingredient metadata, for example fluids
+ *       with different amounts.</li>
  * </ul>
  *
  * Per-category JSON may also include:
@@ -113,7 +116,8 @@ import com.jeidump.i18n.JeiDumpLocales;
  *   <li>{@code tooltipHtml}: array of tooltip lines with Minecraft formatting codes converted to
  *       HTML spans for the frontend.</li>
  *   <li>{@code kind}: ingredient type key, so the frontend can label arbitrary JEI ingredient
- *       kinds without hardcoding item/fluid buckets.</li>
+ *       kinds without hardcoding item/fluid buckets. Synthetic recipe details can omit
+ *       {@code img} when they do not have a standalone icon.</li>
  * </ul>
  *
  * Root metadata also includes:
@@ -170,6 +174,18 @@ public class Dumper {
         private final JsonArray html = new JsonArray();
     }
 
+    /** Synthetic ingredient-kind metadata for recipe details that are not JEI ingredient types. */
+    private static class VirtualIngredientKindState {
+        private final String translationKey;
+        private final String className;
+        private int uniqueCount;
+
+        private VirtualIngredientKindState(String translationKey, String className) {
+            this.translationKey = translationKey;
+            this.className = className;
+        }
+    }
+
     /** Incremental category background split job. */
     private static class BackgroundSplitTask {
         private final JsonObject category;
@@ -211,11 +227,12 @@ public class Dumper {
     private final ICommandSender sender;
     private final IconRenderer renderer = new IconRenderer();
     private final Gson gson = new GsonBuilder().disableHtmlEscaping().create();
+    private final DumpIntegrations integrations = DumpIntegrations.createDefault();
     private final String dumpLocale = JeiDumpLocales.getCurrentLocaleCode();
     private final String generatedAt = Instant.now().toString();
     private final boolean splitRecipeBackgrounds = JeiDumpConfig.splitRecipeBackgrounds;
 
-    /** Generic ingredient metadata keyed by globally unique id (<kind>:<helper unique id>). */
+    /** Real and virtual ingredient metadata keyed by globally unique id. */
     private final Map<String, JsonObject> ingredientMeta = new LinkedHashMap<>();
     /** Inverted index: ingredient id -> list of {cat, idx, role, kind}. */
     private final Map<String, JsonArray> ingredientRecipes = new LinkedHashMap<>();
@@ -223,6 +240,8 @@ public class Dumper {
     private final Map<String, Set<String>> ingredientRecipeKeys = new LinkedHashMap<>();
     /** Cached JEI helper/renderer state for each ingredient type actually encountered. */
     private final Map<IIngredientType<?>, IngredientTypeState<?>> ingredientTypes = new LinkedHashMap<>();
+    /** Synthetic ingredient kinds for recipe details that JEI draws outside ingredient groups. */
+    private final Map<String, VirtualIngredientKindState> virtualIngredientKinds = new LinkedHashMap<>();
 
     // Cached reflective handle to mezz.jei.gui.ingredients.GuiIngredient#getRect().
     // The interface IGuiIngredient does not expose slot positions, but JEI's only concrete
@@ -404,6 +423,7 @@ public class Dumper {
                     JsonArray slots = new JsonArray();
 
                     collectIngredientSlots(layout, currentCatId, wrapperIdx, inputs, outputs, slots);
+                    collectInternalIngredientHotspots(currentCategory, wrapper, currentCatId, wrapperIdx, slots);
 
                     recObj.add("inputs", inputs);
                     recObj.add("outputs", outputs);
@@ -447,7 +467,7 @@ public class Dumper {
             copyResource(src, dst);
         }
 
-        result.iconCount = ingredientMeta.size();
+        result.iconCount = countRenderedIngredientIcons();
 
         long finalDumpBytes = measureTreeBytes(outDir.toPath());
         if (!splitRecipeBackgrounds) {
@@ -512,6 +532,32 @@ public class Dumper {
                                         JsonArray inputs, JsonArray outputs, JsonArray slots) throws IOException {
         for (IngredientGroupAccess<?> access : getIngredientGroups(layout)) {
             collectIngredientGroupSlots(access, catId, recipeIdx, inputs, outputs, slots);
+        }
+    }
+
+    /**
+     * Export recipe details that JEI draws outside ingredient groups as virtual ingredient
+     * hotspots, so the website can search and navigate them like normal ingredients.
+     */
+    private void collectInternalIngredientHotspots(IRecipeCategory<?> category, IRecipeWrapper wrapper,
+                                                   String catId, int recipeIdx, JsonArray slots)
+        throws ReflectiveOperationException {
+        for (RecipeDumpIntegration.Zone zone : integrations.collectZones(category, wrapper)) {
+            String ingredientId = null;
+            String kind = null;
+            TooltipText tooltipOverride = tooltipFromLines(zone.tooltipLines);
+
+            if (zone.ingredient != null) {
+                ingredientId = registerVirtualIngredient(zone.ingredient);
+                kind = zone.ingredient.kind;
+                tooltipOverride = tooltipOverride == null ? null : buildSlotTooltipOverride(ingredientId, tooltipOverride);
+
+                if (zone.role != null) {
+                    addInverted(ingredientId, catId, recipeIdx, zone.role, kind);
+                }
+            }
+
+            addExtraZone(slots, zone, ingredientId, kind, tooltipOverride);
         }
     }
 
@@ -717,7 +763,7 @@ public class Dumper {
     }
 
     @Nullable
-    @SuppressWarnings({"unchecked", "rawtypes"})
+    @SuppressWarnings("unchecked")
     private static <T> List<String> readGuiIngredientTooltip(@Nullable IGuiIngredient<T> guiIngredient,
                                                              T ingredient) {
         if (guiIngredient == null) return null;
@@ -777,6 +823,15 @@ public class Dumper {
             tooltip.plain.add(new JsonPrimitive(stripFormatting(line)));
             tooltip.html.add(new JsonPrimitive(formatMinecraftTextToHtml(line)));
         }
+    }
+
+    @Nullable
+    private static TooltipText tooltipFromLines(@Nullable List<String> lines) {
+        if (lines == null || lines.isEmpty()) return null;
+
+        TooltipText tooltip = new TooltipText();
+        addTooltipLines(tooltip, lines);
+        return tooltip;
     }
 
     private TooltipText buildSlotTooltipOverride(String ingredientId, TooltipText slotTooltip) {
@@ -1013,6 +1068,26 @@ public class Dumper {
         return out.toString();
     }
 
+    private String registerVirtualIngredient(RecipeDumpIntegration.VirtualIngredient ingredient) {
+        String id = ingredient.id;
+        if (ingredientMeta.containsKey(id)) return id;
+
+        JsonObject meta = new JsonObject();
+        meta.addProperty("name", ingredient.name);
+        meta.addProperty("nameHtml", formatMinecraftTextToHtml(ingredient.name));
+        meta.addProperty("mod", ingredient.modName);
+        meta.addProperty("kind", ingredient.kind);
+        ingredientMeta.put(id, meta);
+
+        VirtualIngredientKindState state = virtualIngredientKinds.get(ingredient.kind);
+        if (state == null) {
+            state = new VirtualIngredientKindState(ingredient.translationKey, ingredient.className);
+            virtualIngredientKinds.put(ingredient.kind, state);
+        }
+        state.uniqueCount++;
+        return id;
+    }
+
     private void addInverted(String id, String catId, int recipeIdx, String role, String kind) {
         String refKey = catId + '\n' + recipeIdx + '\n' + role;
         Set<String> seenKeys = ingredientRecipeKeys.get(id);
@@ -1080,6 +1155,29 @@ public class Dumper {
         slot.addProperty("id", id);
         slot.addProperty("kind", kind);
         slot.addProperty("role", ig.isInput() ? "in" : "out");
+        if (tooltipOverride != null) {
+            slot.add("tooltip", tooltipOverride.plain);
+            slot.add("tooltipHtml", tooltipOverride.html);
+        }
+        slots.add(slot);
+    }
+
+    private static void addExtraZone(JsonArray slots, RecipeDumpIntegration.Zone zone, @Nullable String id,
+                                     @Nullable String kind, @Nullable TooltipText tooltipOverride) {
+        JsonObject slot = new JsonObject();
+        slot.addProperty("x", zone.x + RECIPE_PADDING);
+        slot.addProperty("y", zone.y + RECIPE_PADDING);
+        slot.addProperty("w", zone.width);
+        slot.addProperty("h", zone.height);
+        if (id != null) {
+            slot.addProperty("id", id);
+        }
+        if (kind != null) {
+            slot.addProperty("kind", kind);
+        }
+        if (zone.role != null) {
+            slot.addProperty("role", zone.role);
+        }
         if (tooltipOverride != null) {
             slot.add("tooltip", tooltipOverride.plain);
             slot.add("tooltipHtml", tooltipOverride.html);
@@ -1178,6 +1276,16 @@ public class Dumper {
             kind.addProperty("className", state.type.getIngredientClass().getName());
             kind.addProperty("count", state.uniqueCount);
             ingredientKindsRoot.add(state.kind, kind);
+        }
+        for (Map.Entry<String, VirtualIngredientKindState> entry : virtualIngredientKinds.entrySet()) {
+            VirtualIngredientKindState state = entry.getValue();
+            if (state.uniqueCount == 0) continue;
+
+            JsonObject kind = new JsonObject();
+            kind.addProperty("translationKey", state.translationKey);
+            kind.addProperty("className", state.className);
+            kind.addProperty("count", state.uniqueCount);
+            ingredientKindsRoot.add(entry.getKey(), kind);
         }
         root.add("ingredientKinds", ingredientKindsRoot);
 
@@ -1343,6 +1451,14 @@ public class Dumper {
             gson.toJson(root, bw);
             bw.write(";\n");
         }
+    }
+
+    private int countRenderedIngredientIcons() {
+        int count = 0;
+        for (JsonObject meta : ingredientMeta.values()) {
+            if (meta.has("img")) count++;
+        }
+        return count;
     }
 
     private static String formatMiB(long bytes) {

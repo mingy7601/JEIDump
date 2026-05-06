@@ -29,6 +29,21 @@ data/locales/<locale>/ingredients/<kind>/<dedup_id>.png
 
 The frontend is dependency-free: no lunr, no React, no build step. The "fuzzy" search is a lowercase substring + subsequence scorer that handles tens of thousands of entries in the browser without trouble.
 
+## Configurable Tooltip Zones
+
+Configured non-slot tooltip zones can be defined for any loaded mod under `config/jeidump/integrations/<modid>/**/*.json`.
+
+See [thermalexpansion-tooltip-zones.example.json](https://github.com/Aedial/JEIDump/blob/main/docs/thermalexpansion-tooltip-zones.example.json) for a complete example file and [configured-tooltip-zones.schema.json](https://github.com/Aedial/JEIDump/blob/main/docs/configured-tooltip-zones.schema.json) for the JSON Schema.
+
+Each JSON file may contain either a single object, an array of objects, or an object with a `zones` array. Each zone supports:
+- `wrapperClass`: optional wrapper class name. This is matched with `isInstance`, so base wrapper classes work. Either this or `categoryUid` is required to select the relevant recipes.
+- `categoryUid`: optional JEI category uid. Either this or `wrapperClass` is required to select the relevant recipes.
+- `x`, `y`, `width`, `height`: required rectangle coordinates in JEI recipe-local pixels. Use the texture in the relevant mod's JEI plugin as a reference for the coordinate system.
+
+JEI Dump reads every JSON file under `integrations/<modid>/` recursively, even if that mod has no built-in Java integration. The configured rectangle is only the exported hotspot; the tooltip text itself still comes from the mod by calling the recipe wrapper at the configured sample point during the dump.
+
+The example file includes a `$schema` entry so editors can validate and autocomplete the document while you are authoring it.
+
 ## TODO
 - [x] Internationalize the command feedback messages (currently hardcoded in English).
 - [x] Add a "last updated" timestamp to the footer.

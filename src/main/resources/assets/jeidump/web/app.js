@@ -61,6 +61,8 @@
         'jeidump.web.search.type.category': 'category',
         'jeidump.web.search.type.item': 'item',
         'jeidump.web.search.type.fluid': 'fluid',
+        'jeidump.web.search.type.mana': 'mana',
+        'jeidump.web.search.type.rf': 'RF',
         'jeidump.web.recipe.alt': 'Recipe %d',
         'jeidump.web.count.category.one': '%d category',
         'jeidump.web.count.category.many': '%d categories',
@@ -375,9 +377,9 @@
             for (const slot of recipe.slots) {
                 const hotspot = node('a', 'hotspot');
                 hotspot.tabIndex = 0;
-                hotspot.dataset.id = slot.id;
-                hotspot.dataset.kind = slot.kind;
-                hotspot.dataset.role = slot.role;
+                if (slot.id) hotspot.dataset.id = slot.id;
+                if (slot.kind) hotspot.dataset.kind = slot.kind;
+                if (slot.role) hotspot.dataset.role = slot.role;
                 // Keep structured tooltip overrides on the DOM node instead of serializing them
                 // through data-* attributes, which would force lossy escaping/parsing.
                 hotspot.jeiTooltip = slot.tooltip || null;
@@ -785,14 +787,17 @@
                 tip.hidden = true;
             });
             spot.addEventListener('click', event => {
+                if (!spot.dataset.id) return;
                 event.preventDefault();
                 jumpTo(spot.dataset.id, 'for');
             });
             spot.addEventListener('contextmenu', event => {
+                if (!spot.dataset.id) return;
                 event.preventDefault();
                 jumpTo(spot.dataset.id, 'use');
             });
             spot.addEventListener('keydown', event => {
+                if (!spot.dataset.id) return;
                 if (event.key === 'Enter') {
                     event.preventDefault();
                     jumpTo(spot.dataset.id, event.shiftKey ? 'use' : 'for');
@@ -842,26 +847,27 @@
     function showTooltip(tip, spot) {
         const id = spot.dataset.id;
         const meta = DATA.ingredients[id];
-        if (!meta) {
+        const lines = spot.jeiTooltip && spot.jeiTooltip.length ? spot.jeiTooltip : (meta && meta.tooltip && meta.tooltip.length ? meta.tooltip : []);
+        const htmlLines = spot.jeiTooltipHtml && spot.jeiTooltipHtml.length ? spot.jeiTooltipHtml : (meta && meta.tooltipHtml && meta.tooltipHtml.length ? meta.tooltipHtml : []);
+        if ((!meta || !meta.name) && lines.length === 0) {
             tip.hidden = true;
             return;
         }
 
         // First line = display name (white), rest dimmed (matches vanilla aesthetic).
-        const lines = spot.jeiTooltip && spot.jeiTooltip.length ? spot.jeiTooltip : (meta.tooltip && meta.tooltip.length ? meta.tooltip : [meta.name]);
-        const htmlLines = spot.jeiTooltipHtml && spot.jeiTooltipHtml.length ? spot.jeiTooltipHtml : (meta.tooltipHtml && meta.tooltipHtml.length ? meta.tooltipHtml : []);
+        const visibleLines = lines.length ? lines : [meta.name];
         tip.replaceChildren();
 
         const titleLine = node('div', 'tt-name');
-        setRichText(titleLine, htmlLines[0], lines[0]);
+        setRichText(titleLine, htmlLines[0], visibleLines[0]);
         tip.appendChild(titleLine);
 
-        for (let i = 1; i < lines.length; i++) {
+        for (let i = 1; i < visibleLines.length; i++) {
             const line = node('div', 'tt-line');
-            setRichText(line, htmlLines[i], lines[i]);
+            setRichText(line, htmlLines[i], visibleLines[i]);
             tip.appendChild(line);
         }
-        if (meta.mod) tip.appendChild(node('div', 'tt-mod', meta.mod));
+        if (meta && meta.mod) tip.appendChild(node('div', 'tt-mod', meta.mod));
         tip.hidden = false;
     }
 
