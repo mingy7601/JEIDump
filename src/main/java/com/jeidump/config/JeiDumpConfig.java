@@ -58,6 +58,12 @@ public class JeiDumpConfig {
     public static int backgroundSplitImagesPerTick = 20;
 
     /**
+     * List of JEI category UIDs to skip during a dump.
+     * Example: "minecraft.crafting,thermalexpansion.furnace"
+     */
+    public static String[] blacklistedCategories = new String[0];
+
+    /**
      * Initializes the configuration from the given file.
      *
      * @param configFile The configuration file
@@ -131,6 +137,14 @@ public class JeiDumpConfig {
         p.setLanguageKey(Tags.MODID + ".config.backgroundSplitImagesPerTick");
         backgroundSplitImagesPerTick = p.getInt();
 
+        p = config.get(CATEGORY_GENERAL,
+                "blacklistedCategories", new String[0],
+                "List of JEI category UIDs to exclude from the dump. " +
+                        "Use the exact UID string (e.g. \"minecraft.crafting\"). " +
+                        "You can find UIDs in the generated dump's index.json under each category's \"uid\" field."
+        );
+        p.setLanguageKey(Tags.MODID + ".config.blacklistedCategories");
+        blacklistedCategories = p.getStringList();
         if (config.hasChanged()) config.save();
     }
 

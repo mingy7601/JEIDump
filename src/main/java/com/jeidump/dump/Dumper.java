@@ -220,7 +220,8 @@ public class Dumper {
      * shifted by the same value so click targets stay aligned.
      */
     private static final int RECIPE_PADDING = 8;
-
+    private final Set<String> blacklistedCategoryUids =
+            new LinkedHashSet<>(java.util.Arrays.asList(JeiDumpConfig.blacklistedCategories));
     private final IJeiRuntime runtime;
     private final IIngredientRegistry ingredientRegistry;
     private final File outDir;
@@ -331,6 +332,11 @@ public class Dumper {
 
         IRecipeRegistry rr = runtime.getRecipeRegistry();
         categories = rr.getRecipeCategories();
+        if (!blacklistedCategoryUids.isEmpty()) {
+            categories = categories.stream()
+                    .filter(cat -> !blacklistedCategoryUids.contains(cat.getUid()))
+                    .collect(java.util.stream.Collectors.toList());
+        }
         result.categoryCount = categories.size();
 
         for (IRecipeCategory cat : categories) {
