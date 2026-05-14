@@ -66,7 +66,6 @@ import com.jeidump.i18n.JeiDumpLocales;
 
 /**
  * Stateful JEI dumper.
- *
  * The work is split into three phases:
  * <ol>
  *   <li>{@link #setup()}: prepares the output directory tree and pre-counts recipes.</li>
@@ -244,6 +243,8 @@ public class Dumper {
     /** Synthetic ingredient kinds for recipe details that JEI draws outside ingredient groups. */
     private final Map<String, VirtualIngredientKindState> virtualIngredientKinds = new LinkedHashMap<>();
 
+    private boolean slim;
+
     // Cached reflective handle to mezz.jei.gui.ingredients.GuiIngredient#getRect().
     // The interface IGuiIngredient does not expose slot positions, but JEI's only concrete
     // implementation does; reading it is the cleanest way to mirror JEI's hover hotspots
@@ -297,15 +298,16 @@ public class Dumper {
     private int backgroundSplitTaskIdx;
     private long dedupSavedBytes;
 
-    public Dumper(IJeiRuntime runtime, IIngredientRegistry ingredientRegistry, File outDir, ICommandSender sender) {
+    public Dumper(IJeiRuntime runtime, IIngredientRegistry ingredientRegistry, File outDir, ICommandSender sender, boolean slim) {
         this.runtime = runtime;
         this.ingredientRegistry = ingredientRegistry;
         this.outDir = outDir;
         this.sender = sender;
+        this.slim = slim;
     }
 
-    public static Dumper create(IJeiRuntime runtime, IIngredientRegistry ingredientRegistry, File outDir, ICommandSender sender) {
-        return new Dumper(runtime, ingredientRegistry, outDir, sender);
+    public static Dumper create(IJeiRuntime runtime, IIngredientRegistry ingredientRegistry, File outDir, ICommandSender sender, boolean slim) {
+        return new Dumper(runtime, ingredientRegistry, outDir, sender,slim);
     }
 
     public Result getResult() {
@@ -403,7 +405,9 @@ public class Dumper {
             IRecipeWrapper wrapper = currentWrappers.get(wrapperIdx);
             try {
                 IRecipeLayoutDrawable layout = createLayoutWithRetry(rr, currentCategory, wrapper);
-                if (layout != null) {
+                JsonObject recObj = new JsonObject();
+
+                if (!slim){
                     File pngFile = new File(currentCatFolder, "recipe_" + wrapperIdx + ".png");
                     renderer.renderRecipeLayout(layout, currentBgW, currentBgH, RECIPE_PADDING, pngFile);
 
@@ -413,7 +417,6 @@ public class Dumper {
                     int canvasW = currentBgW + RECIPE_PADDING * 2;
                     int canvasH = currentBgH + RECIPE_PADDING * 2;
 
-                    JsonObject recObj = new JsonObject();
                     // During the final deduplication pass this file may be rewritten in place as
                     // a foreground-only layer if the shared background split is smaller on disk.
                     recObj.addProperty("img", localeDataPath("categories/" + currentCatId + "/recipe_" + wrapperIdx + ".png"));
@@ -423,19 +426,20 @@ public class Dumper {
                     // image at integer multiples of the logical size (1x, 2x, ...) instead of
                     // stretching it to fit the card width.
                     recObj.addProperty("scale", JeiDumpConfig.recipeScale);
-
-                    JsonArray inputs = new JsonArray();
-                    JsonArray outputs = new JsonArray();
-                    JsonArray slots = new JsonArray();
-
-                    collectIngredientSlots(layout, currentCatId, wrapperIdx, inputs, outputs, slots);
-                    collectInternalIngredientHotspots(currentCategory, wrapper, currentCatId, wrapperIdx, slots);
-
-                    recObj.add("inputs", inputs);
-                    recObj.add("outputs", outputs);
-                    recObj.add("slots", slots);
-                    currentRecipesJson.add(recObj);
                 }
+                JsonArray inputs = new JsonArray();
+                JsonArray outputs = new JsonArray();
+                JsonArray slots = new JsonArray();
+                recObj.addProperty("id", 0);
+
+                collectIngredientSlots(layout, currentCatId, wrapperIdx, inputs, outputs, slots);
+                collectInternalIngredientHotspots(currentCategory, wrapper, currentCatId, wrapperIdx, slots);
+                recObj.add("inputs", inputs);
+                recObj.add("outputs", outputs);
+                recObj.add("slots", slots);
+
+
+                currentRecipesJson.add(recObj);
             } catch (Throwable t) {
                 JeiDump.LOGGER.warn("Skipping recipe #{} of category {}: {}", wrapperIdx, currentCategory.getUid(), t.toString());
             }
@@ -460,7 +464,14 @@ public class Dumper {
         flushRecipePhase();
 
         JsonObject root = buildDataRoot();
-        writeJson(root, new File(localeDataDir, "index.json"));
+
+        if (!slim) {
+            writeJson(root, new File(localeDataDir, "index.json"));
+            writeLocaleDataScript(root, new File(localeDataDir, "index.js"), dumpLocale);
+        } else {
+            JsonObject slimRoot = buildSlimDataRoot();
+            writeJson(slimRoot, new File(localeDataDir, "index.slim.json"));
+        }
         writeLocaleDataScript(root, new File(localeDataDir, "index.js"), dumpLocale);
 
         writeDataManifest();
@@ -534,8 +545,9 @@ public class Dumper {
 
     // ----- ingredient collection -----
 
-    private void collectIngredientSlots(IRecipeLayoutDrawable layout, String catId, int recipeIdx,
+    private void collectIngredientSlots(@Nullable IRecipeLayoutDrawable layout, String catId, int recipeIdx,
                                         JsonArray inputs, JsonArray outputs, JsonArray slots) throws IOException {
+        if (layout == null) return; // slim mode: no layout rendered, skip slot collection
         for (IngredientGroupAccess<?> access : getIngredientGroups(layout)) {
             collectIngredientGroupSlots(access, catId, recipeIdx, inputs, outputs, slots);
         }
@@ -605,7 +617,13 @@ public class Dumper {
             if (primary == null) continue;
 
             String primaryId = registerIngredient(state, primary, ingredient);
-            (ingredient.isInput() ? inputs : outputs).add(new JsonPrimitive(primaryId));
+            //(ingredient.isInput() ? inputs : outputs).add(new JsonPrimitive(primaryId));
+            JsonObject ingredientRef = new JsonObject();
+            ingredientRef.addProperty("id", primaryId);
+            int qty = getIngredientQuantity(primary);
+            if (qty != 1) ingredientRef.addProperty("qty", qty);
+            (ingredient.isInput() ? inputs : outputs).add(ingredientRef);
+
             addSlot(slots, ingredient, primaryId, state.kind, RECIPE_PADDING,
                 buildSlotTooltipOverride(primaryId, buildIngredientTooltip(state, ingredient, primary)));
 
@@ -725,7 +743,9 @@ public class Dumper {
         }
 
         String fileStem = fileStemFor(id);
-        renderer.renderIngredientIcon(state.renderer, ingredient, new File(state.rootDir, fileStem + ".png"));
+        if (!slim) {
+            renderer.renderIngredientIcon(state.renderer, ingredient, new File(state.rootDir, fileStem + ".png"));
+        }
 
         String displayName = safeDisplayName(state, ingredient);
         TooltipText tooltip = buildIngredientTooltip(state, guiIngredient, ingredient);
@@ -1309,7 +1329,77 @@ public class Dumper {
         return root;
     }
 
+    /**
+     * Builds a slim version of the locale data root that contains only the fields needed
+     * for lightweight consumers: recipe image path, inputs, outputs, and per-ingredient
+     * tooltipHtml. Omits slots (x/y/w/h hotspot data) and plain-text tooltip duplicates.
+     */
+    private JsonObject buildSlimDataRoot() {
+        JsonObject root = new JsonObject();
+        root.addProperty("locale", dumpLocale);
+        root.addProperty("generatedAt", generatedAt);
+
+        // Categories: keep only id, uid, title, modName, recipeCount, and a stripped recipe list.
+        JsonArray slimCategories = new JsonArray();
+        for (JsonElement categoryElement : categoriesJson) {
+            JsonObject cat = categoryElement.getAsJsonObject();
+            JsonObject slimCat = new JsonObject();
+            slimCat.addProperty("id",         cat.get("id").getAsString());
+            slimCat.addProperty("uid",        cat.get("uid").getAsString());
+            slimCat.addProperty("title",      cat.get("title").getAsString());
+            slimCat.addProperty("modName",    cat.get("modName").getAsString());
+            slimCat.addProperty("recipeCount", cat.get("recipeCount").getAsInt());
+
+            JsonArray slimRecipes = new JsonArray();
+            JsonArray recipes = cat.getAsJsonArray("recipes");
+            if (recipes != null) {
+                for (JsonElement recipeElement : recipes) {
+                    JsonObject recipe = recipeElement.getAsJsonObject();
+                    JsonObject slimRecipe = new JsonObject();
+                    // img may be absent if the layout failed to render.
+                    if (recipe.has("img"))     slimRecipe.addProperty("img", recipe.get("img").getAsString());
+                    if (recipe.has("inputs"))  slimRecipe.add("inputs",  recipe.getAsJsonArray("inputs"));
+                    if (recipe.has("outputs")) slimRecipe.add("outputs", recipe.getAsJsonArray("outputs"));
+                    slimRecipes.add(slimRecipe);
+                }
+            }
+            slimCat.add("recipes", slimRecipes);
+            slimCategories.add(slimCat);
+        }
+        root.add("categories", slimCategories);
+
+        // Ingredients: keep only img and tooltipHtml per ingredient.
+        JsonObject slimIngredients = new JsonObject();
+        for (Map.Entry<String, JsonObject> entry : ingredientMeta.entrySet()) {
+            JsonObject meta = entry.getValue();
+            JsonObject slimMeta = new JsonObject();
+            if (meta.has("img"))        slimMeta.addProperty("img", meta.get("img").getAsString());
+            if (meta.has("tooltipHtml")) slimMeta.add("tooltipHtml", meta.getAsJsonArray("tooltipHtml"));
+            slimIngredients.add(entry.getKey(), slimMeta);
+        }
+        root.add("ingredients", slimIngredients);
+
+        return root;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> int getIngredientQuantity(T ingredient) {
+        if (ingredient instanceof ItemStack) {
+            return Math.max(1, ((ItemStack) ingredient).getCount());
+        }
+        // FluidStack quantity (in mB). Cast via class name to avoid a hard dep on Forge fluid API.
+        try {
+            Class<?> fluidStackClass = Class.forName("net.minecraftforge.fluids.FluidStack");
+            if (fluidStackClass.isInstance(ingredient)) {
+                Object amount = fluidStackClass.getField("amount").get(ingredient);
+                if (amount instanceof Integer) return (int) amount;
+            }
+        } catch (Throwable ignored) {}
+        return 1;
+    }
+
     private boolean prepareBackgroundSplitTasks() {
+        if (slim) return false;
         backgroundSplitTasks.clear();
         backgroundSplitTaskIdx = 0;
         dedupSavedBytes = 0L;

@@ -51,6 +51,8 @@ public class JeiDumpConfig {
      */
     public static boolean splitRecipeBackgrounds = false;
 
+    public static boolean enableSlim = true;
+
     /**
      * Maximum number of background-splitting image operations processed per client tick.
      * Lower values reduce UI hitching during the post-processing phase.
@@ -121,12 +123,19 @@ public class JeiDumpConfig {
         recipeScale = p.getInt();
 
         p = config.get(CATEGORY_GENERAL,
-            "splitRecipeBackgrounds", false,
-            "Extract shared recipe backgrounds into a separate image per category when that reduces the total dump size. " +
-            "Disable this to keep every recipe as a standalone PNG. May consume a lot during splitting, enable with caution on bigger modpacks."
+                "splitRecipeBackgrounds", false,
+                "Extract shared recipe backgrounds into a separate image per category when that reduces the total dump size. " +
+                        "Disable this to keep every recipe as a standalone PNG. May consume a lot during splitting, enable with caution on bigger modpacks."
         );
         p.setLanguageKey(Tags.MODID + ".config.splitRecipeBackgrounds");
         splitRecipeBackgrounds = p.getBoolean();
+
+        p = config.get(CATEGORY_GENERAL,
+                "enableSlim", true,
+                "Slim mode"
+        );
+        p.setLanguageKey(Tags.MODID + ".config.enableSlim");
+        enableSlim = p.getBoolean();
 
         p = config.get(CATEGORY_GENERAL,
             "backgroundSplitImagesPerTick", 20,

@@ -81,6 +81,7 @@ public class CommandDumpJei extends CommandBase {
         String folderName = args.length > 0 ? sanitize(args[0]) : new SimpleDateFormat("yyyyMMdd-HHmmss").format(new Date());
         // Optional second arg: budget per tick. Clamp to a sane range to avoid /dumpjei x 0 stalling forever.
         int budget = JeiDumpConfig.defaultRecipesPerTick;
+        boolean slim = JeiDumpConfig.enableSlim;
         if (args.length > 1) {
             try {
                 budget = Math.max(1, Integer.parseInt(args[1]));
@@ -95,7 +96,7 @@ public class CommandDumpJei extends CommandBase {
         sender.sendMessage(new TextComponentTranslation("jeidump.command.start", outDir.getAbsolutePath()));
         info(sender, "jeidump.command.budget", budget);
 
-        Dumper job = Dumper.create(runtime, ingredientRegistry, outDir, sender);
+        Dumper job = Dumper.create(runtime, ingredientRegistry, outDir, sender, slim);
         try {
             job.setup();
         } catch (Throwable t) {
